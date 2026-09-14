@@ -55,12 +55,14 @@ class TestCategoryClassification:
         result = profiler.profile(path)
         assert result.category == FileCategory.DOCUMENT
         assert result.file_type == "pdf"
+        assert result.recommended_engine == "mineru"
 
     def test_markdown_classified_as_document(self, profiler, tmp_dir):
         path = _write_file(tmp_dir, "readme.md", "# Hello World\n\nSome content.")
         result = profiler.profile(path)
         assert result.category == FileCategory.DOCUMENT
         assert result.file_type == "md"
+        assert result.recommended_engine == "native"
 
     def test_xlsx_classified_as_spreadsheet(self, profiler, tmp_dir):
         # XLSX is a zip file, use minimal bytes
@@ -68,6 +70,7 @@ class TestCategoryClassification:
         result = profiler.profile(path)
         assert result.category == FileCategory.SPREADSHEET
         assert result.has_tables is True
+        assert result.recommended_engine == "mineru"
 
     def test_csv_classified_as_spreadsheet(self, profiler, tmp_dir):
         path = _write_file(tmp_dir, "data.csv", "col1,col2,col3\na,b,c\nd,e,f\n")
@@ -84,11 +87,13 @@ class TestCategoryClassification:
         result = profiler.profile(path)
         assert result.category == FileCategory.IMAGE
         assert result.has_images is True
+        assert result.recommended_engine == "mineru"
 
     def test_unknown_extension(self, profiler, tmp_dir):
         path = _write_file(tmp_dir, "mystery.xyz", "unknown content")
         result = profiler.profile(path)
         assert result.category == FileCategory.UNKNOWN
+        assert result.recommended_engine == "unsupported"
 
     def test_txt_classified_as_document(self, profiler, tmp_dir):
         path = _write_file(tmp_dir, "notes.txt", "Plain text notes.\n\nParagraph two.")

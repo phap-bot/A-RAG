@@ -3,6 +3,8 @@ Parser models.py — ProfilerResult, BoundingBox validation, ParsedDocument auto
 ContentChunk final contract, and section_path/parent_header hierarchy tracking.
 """
 
+import json
+
 import pytest
 from datetime import datetime, timezone
 from pydantic import ValidationError
@@ -23,6 +25,12 @@ from src.ingestion.parser.models import (
     generate_element_id,
 )
 from src.ingestion.parser.layout_parser import DocumentLayoutParser
+from src.ingestion.parser.skills import (
+    TableParsingSkill,
+    VLMCaptioningSkill,
+    apply_document_skills_tool,
+    parse_markdown_tool,
+)
 
 
 # =====================================================================
@@ -362,3 +370,83 @@ class TestUtilities:
     def test_generate_element_id_format(self):
         eid = generate_element_id("abc123", 42)
         assert eid == "abc123-elem-0042"
+
+
+class TestParserSkills:
+    def test_langchain_tools_expose_descriptive_names(self):
+        assert parse_markdown_tool.name == "parse_markdown_tool"
+        assert apply_document_skills_tool.name == "apply_document_skills_tool"
+        assert "validated" in parse_markdown_tool.description.lower()
+
+    def test_markdown_tool_returns_serialized_parsed_document(self):
+        result = json.loads(
+            parse_markdown_tool.invoke(
+            {
+                "markdown": "# Title\n\nA paragraph.",
+                "file_name": "input.md",
+            }
+            )
+        )
+
+        document = ParsedDocument.model_validate(result)
+        assert document.file_name == "input.md"
+        assert document.elements[0].metadata.element_type == "header"
+
+    def test_markdown_tool_rejects_empty_markdown(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_markdown_tool.invoke({"markdown": "   "})
+
+    def test_table_skill_normalizes_cells_and_preserves_metadata(self):
+        parser = DocumentLayoutParser()
+        document = parser.parse_markdown(
+            "# Report\n\n| Name | Value |\n| --- | --- |\n|  A  | 1 |\n",
+            file_name="report.md",
+        )
+        table = next(e for e in document.elements if e.metadata.element_type == "table")
+
+        result = TableParsingSkill().apply(table)
+
+        assert result is table
+        assert result.content == "| Name | Value |\n| --- | --- |\n| A | 1 |"
+        assert result.metadata.extra["row_count"] == 3
+        assert result.metadata.extra["col_count"] == 2
+
+    def test_table_skill_rejects_non_table_element(self):
+        parser = DocumentLayoutParser()
+        text = parser.parse_text("A paragraph.").elements[0]
+
+        with pytest.raises(ValueError, match="table element"):
+            TableParsingSkill().apply(text)
+
+    def test_vlm_skill_fallback_populates_image_caption(self):
+        parser = DocumentLayoutParser()
+        image = parser.parse_markdown(
+            "![Workflow diagram](assets/workflow.png)", file_name="arch.md"
+        ).elements[0]
+
+        result = VLMCaptioningSkill().apply(image)
+
+        assert result is image
+        assert result.vlm_caption == "Image asset 'assets/workflow.png': Workflow diagram."
+        assert result.metadata.extra["caption_source"] == "deterministic_fallback"
+
+    def test_vlm_skill_rejects_non_image_element(self):
+        parser = DocumentLayoutParser()
+        text = parser.parse_text("A paragraph.").elements[0]
+
+        with pytest.raises(ValueError, match="image element"):
+            VLMCaptioningSkill().apply(text)
+
+    def test_apply_document_skills_enriches_document_without_changing_element_order(self):
+        parser = DocumentLayoutParser()
+        document = parser.parse_markdown(
+            "| Name | Value |\n| --- | --- |\n| A | 1 |\n\n![Diagram](diagram.png)\n",
+            file_name="mixed.md",
+        )
+        original_ids = [element.element_id for element in document.elements]
+
+        result = json.loads(apply_document_skills_tool.invoke({"document": document}))
+        result = ParsedDocument.model_validate(result)
+
+        assert [element.element_id for element in result.elements] == original_ids
+        assert any(element.vlm_caption for element in result.elements)

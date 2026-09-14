@@ -1,0 +1,32 @@
+[
+  {
+    "type": "title",
+    "text": "MinerU Fixture",
+    "bbox": [100, 100, 900, 180],
+    "page_idx": 0,
+    "score": 0.99
+  },
+  {
+    "type": "text",
+    "text": "A representative MinerU content block.",
+    "bbox": [100, 220, 900, 300],
+    "page_idx": 0,
+    "score": 0.98
+  },
+  {
+    "type": "table",
+    "table_body": "<html><body><table><tr><th>Key</th><th>Value</th></tr><tr><td>engine</td><td>mineru</td></tr></table></body></html>",
+    "table_caption": ["Fixture table."],
+    "bbox": [100, 340, 900, 520],
+    "page_idx": 0,
+    "score": 0.97
+  },
+  {
+    "type": "image",
+    "img_path": "images/fixture.png",
+    "image_caption": ["A fixture image."],
+    "bbox": [100, 560, 900, 900],
+    "page_idx": 0,
+    "score": 0.96
+  }
+]
