@@ -1,0 +1,16 @@
+{
+  "description": "Minimal MinerU response fixture for Zone 1 normalization tests",
+  "backend": "pipeline",
+  "outputs": {
+    "content_list": "content_list.json",
+    "markdown": "sample.md"
+  },
+  "recommended_source_matrix": [
+    {"name": "born_digital_pdf", "extension": ".pdf", "engine": "mineru", "fallback": "pypdf"},
+    {"name": "scanned_pdf", "extension": ".pdf", "engine": "mineru", "fallback": "pypdf_with_ocr_limitation"},
+    {"name": "word_document", "extension": ".docx", "engine": "mineru", "fallback": "fail_fast"},
+    {"name": "presentation", "extension": ".pptx", "engine": "mineru", "fallback": "fail_fast"},
+    {"name": "workbook", "extension": ".xlsx", "engine": "mineru", "fallback": "fail_fast"},
+    {"name": "image", "extension": ".png", "engine": "mineru", "fallback": "fail_fast"}
+  ]
+}

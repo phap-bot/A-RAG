@@ -23,8 +23,29 @@ from src.ingestion.parser.models import (
 )
 
 
+_MINERU_REQUIRED_EXTENSIONS = {
+    "docx",
+    "pptx",
+    "xlsx",
+    "png",
+    "jpg",
+    "jpeg",
+    "jp2",
+    "gif",
+    "bmp",
+    "webp",
+    "svg",
+    "tiff",
+    "tif",
+}
+
+
 class DocumentLayoutParser:
-    """Multi-modal document parser supporting Markdown, Text, and PDF files."""
+    """Native parser for text-like formats and the PDF fallback path.
+
+    MinerU-required Office and standalone image files are rejected here so a
+    caller cannot accidentally bypass the orchestrator's fail-fast policy.
+    """
 
     def __init__(self):
         logger.info("Initializing DocumentLayoutParser with layout analysis rules")
@@ -33,6 +54,8 @@ class DocumentLayoutParser:
         """Parse a local document file into structured elements with rich metadata."""
         if not os.path.exists(file_path):
             raise ParsingError(f"File does not exist: {file_path}")
+        if not os.path.isfile(file_path):
+            raise ParsingError(f"Path is not a regular file: {file_path}")
 
         file_name = os.path.basename(file_path)
         ext = os.path.splitext(file_name)[1].lower().lstrip(".")
@@ -42,7 +65,7 @@ class DocumentLayoutParser:
         with open(file_path, "rb") as f:
             content_bytes = f.read()
 
-        doc_id = hashlib.sha256(content_bytes).hexdigest()[:16]
+        doc_id = generate_doc_id(content_bytes)
 
         if ext in ["md", "markdown"]:
             text_content = content_bytes.decode("utf-8", errors="replace")
@@ -50,12 +73,28 @@ class DocumentLayoutParser:
         elif ext in ["txt", "text", "log"]:
             text_content = content_bytes.decode("utf-8", errors="replace")
             return self.parse_text(text_content, file_name=file_name, doc_id=doc_id)
+        elif ext in ["csv", "tsv"]:
+            text_content = content_bytes.decode("utf-8", errors="replace")
+            delimiter = "\t" if ext == "tsv" else ","
+            return self.parse_csv(text_content, file_name=file_name, doc_id=doc_id, delimiter=delimiter)
         elif ext == "pdf":
             return self.parse_pdf(file_path, file_name=file_name, doc_id=doc_id)
-        else:
-            # Generic text fallback
+        elif ext in [
+            "py", "js", "ts", "java", "cpp", "c", "h", "go", "rs", "rb",
+            "php", "sql", "sh", "bash", "yaml", "yml", "json", "xml", "html",
+            "css", "toml", "ini", "cfg",
+        ]:
             text_content = content_bytes.decode("utf-8", errors="replace")
-            return self.parse_text(text_content, file_name=file_name, doc_id=doc_id)
+            return self.parse_code(text_content, file_name=file_name, doc_id=doc_id, language=ext)
+        elif ext in _MINERU_REQUIRED_EXTENSIONS:
+            raise ParsingError(
+                f"'.{ext}' requires the MinerU pipeline; native parser bypass is disabled"
+            )
+        else:
+            raise ParsingError(
+                f"Unsupported native parser format '.{ext or 'unknown'}'; "
+                "profile the source and select an active parser tool"
+            )
 
     def parse_markdown(
         self,
@@ -356,6 +395,114 @@ class DocumentLayoutParser:
             doc_metadata={"element_count": len(elements)},
         )
 
+    def parse_code(
+        self,
+        code_text: str,
+        file_name: str = "source.txt",
+        doc_id: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> ParsedDocument:
+        """Parse a source file as one typed code element with provenance."""
+        file_type = os.path.splitext(file_name)[1].lower().lstrip(".") or "text"
+        doc_id = doc_id or hashlib.sha256(code_text.encode("utf-8")).hexdigest()[:16]
+        content = code_text or "[EMPTY CODE FILE]"
+        element = ParsedElement(
+            element_id=generate_element_id(doc_id, 0),
+            content=content,
+            raw_content=code_text,
+            metadata=ElementMetadata(
+                source_doc=file_name,
+                page_number=1,
+                element_index=0,
+                element_type="code",
+                confidence=1.0,
+                extra={
+                    "language": language or file_type,
+                    "char_count": len(code_text),
+                },
+            ),
+        )
+        return ParsedDocument(
+            document_id=doc_id,
+            file_name=file_name,
+            file_type=file_type,
+            total_pages=1,
+            elements=[element],
+            doc_metadata={"element_count": 1, "language": language or file_type},
+        )
+
+    def parse_csv(
+        self,
+        csv_text: str,
+        file_name: str = "data.csv",
+        doc_id: Optional[str] = None,
+        delimiter: str = ",",
+    ) -> ParsedDocument:
+        """Parse CSV or TSV spreadsheet data into structured table elements with rich metadata."""
+        import csv
+        import io
+
+        doc_id = doc_id or hashlib.sha256(csv_text.encode("utf-8")).hexdigest()[:16]
+        file_type = os.path.splitext(file_name)[1].lower().lstrip(".") or "csv"
+        f = io.StringIO(csv_text.strip())
+        reader = csv.reader(f, delimiter=delimiter)
+        rows = [row for row in reader if any(cell.strip() for cell in row)]
+
+        if not rows:
+            return ParsedDocument(
+                document_id=doc_id,
+                file_name=file_name,
+                file_type=file_type,
+                total_pages=1,
+                elements=[],
+                doc_metadata={"element_count": 0, "has_tables": False, "has_images": False},
+            )
+
+        headers = [c.strip() for c in rows[0]]
+        md_lines = ["| " + " | ".join(headers) + " |"]
+        md_lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+
+        for row in rows[1:]:
+            cells = [c.strip() for c in row]
+            if len(cells) < len(headers):
+                cells.extend([""] * (len(headers) - len(cells)))
+            else:
+                cells = cells[:len(headers)]
+            md_lines.append("| " + " | ".join(cells) + " |")
+
+        table_content = "\n".join(md_lines)
+        element = ParsedElement(
+            element_id=generate_element_id(doc_id, 0),
+            content=table_content,
+            raw_content=csv_text,
+            metadata=ElementMetadata(
+                source_doc=file_name,
+                page_number=1,
+                element_index=0,
+                element_type="table",
+                confidence=1.0,
+                extra={
+                    "row_count": len(rows),
+                    "col_count": len(headers),
+                    "headers": headers,
+                    "sheet_name": "Sheet1",
+                },
+            ),
+        )
+
+        return ParsedDocument(
+            document_id=doc_id,
+            file_name=file_name,
+            file_type=file_type,
+            total_pages=1,
+            elements=[element],
+            doc_metadata={
+                "element_count": 1,
+                "has_tables": True,
+                "has_images": False,
+            },
+        )
+
     def parse_pdf(
         self,
         file_path: str,
@@ -424,7 +571,10 @@ class DocumentLayoutParser:
             logger.warning(f"pypdf extraction failed or not found ({exc}). Using text parsing fallback.")
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 raw_text = f.read()
-            return self.parse_text(raw_text, file_name=file_name, doc_id=doc_id)
+            fallback_document = self.parse_text(raw_text, file_name=file_name, doc_id=doc_id)
+            fallback_document.file_type = "pdf"
+            fallback_document.doc_metadata.update({"parser": "text_fallback"})
+            return fallback_document
 
         return ParsedDocument(
             document_id=doc_id,

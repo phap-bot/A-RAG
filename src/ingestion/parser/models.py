@@ -11,7 +11,7 @@ the parser/ directory. Every stage of the pipeline produces typed Pydantic model
     ↓
   ParsedElement[]      (layout_parser.py + skills.py output)
     ↓
-  ParsedDocument       (md_to_json.py validated output)
+  ParsedDocument       (validated parser-tool output)
     ↓
   ContentChunk[]       (chunking/ input — THE FINAL CONTRACT)
 
@@ -57,6 +57,14 @@ class ExtractionStrategy(str, Enum):
 ElementType = Literal["header", "text", "table", "image", "code", "list", "chart", "equation"]
 
 ModalityType = Literal["text", "table", "image", "chart", "code"]
+ParserEngine = Literal["mineru", "native", "unsupported"]
+ChunkStrategy = Literal[
+    "hierarchical_semantic",
+    "page_element",
+    "row_window",
+    "code_boundary",
+    "token_window",
+]
 
 
 # =====================================================================
@@ -84,6 +92,10 @@ class ProfilerResult(BaseModel):
     file_type: str = Field(..., description="Lowercase extension without dot (pdf, md, xlsx, ...)")
     category: FileCategory = Field(..., description="Top-level file classification")
     strategy: ExtractionStrategy = Field(..., description="Recommended extraction pipeline")
+    recommended_engine: ParserEngine = Field(
+        default="native",
+        description="Recommended execution engine: MinerU API, native parser, or unsupported",
+    )
     fingerprint: FileFingerprint = Field(..., description="Content-based identity for deduplication")
 
     # Feature flags — signals to skill dispatcher
@@ -246,6 +258,22 @@ class ChunkMetadata(BaseModel):
     has_image: bool = Field(default=False, description="Chunk references an image or chart")
     language: Optional[str] = Field(default=None, description="Programming language if code, or natural language hint")
 
+    # Chunk lineage and planning metadata. These fields make the chunk tree
+    # reconstructable after indexing, without relying on vector-store order.
+    chunk_strategy: ChunkStrategy = Field(
+        default="hierarchical_semantic",
+        description="Deterministic strategy used to produce this chunk",
+    )
+    chunk_index: int = Field(default=0, ge=0, description="Stable order within the parent document")
+    parent_chunk_id: Optional[str] = Field(
+        default=None,
+        description="Nearest section/header chunk in the document hierarchy",
+    )
+    extra: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional lineage such as source element types and row ranges",
+    )
+
 
 class ContentChunk(BaseModel):
     """The FINAL normalized data unit that crosses the parser/ boundary into chunking/.
@@ -308,6 +336,8 @@ __all__ = [
     "ExtractionStrategy",
     "ElementType",
     "ModalityType",
+    "ParserEngine",
+    "ChunkStrategy",
     # Profiler
     "FileFingerprint",
     "ProfilerResult",

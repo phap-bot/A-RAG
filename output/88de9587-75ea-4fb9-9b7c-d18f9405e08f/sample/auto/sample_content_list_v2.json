@@ -1,0 +1,56 @@
+[
+    [
+        {
+            "type": "title",
+            "content": {
+                "title_content": [
+                    {
+                        "type": "text",
+                        "content": "A-RAG MinerU UI smoke test"
+                    }
+                ],
+                "level": 2
+            },
+            "bbox": [
+                115,
+                126,
+                539,
+                148
+            ]
+        },
+        {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {
+                        "type": "text",
+                        "content": "This PDF verifies API output reaches the review UI."
+                    }
+                ]
+            },
+            "bbox": [
+                115,
+                167,
+                542,
+                184
+            ]
+        },
+        {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {
+                        "type": "text",
+                        "content": "Provenance: page 1, source element from MinerU."
+                    }
+                ]
+            },
+            "bbox": [
+                115,
+                192,
+                537,
+                209
+            ]
+        }
+    ]
+]

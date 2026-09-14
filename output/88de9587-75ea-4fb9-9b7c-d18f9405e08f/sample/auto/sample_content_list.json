@@ -1,0 +1,36 @@
+[
+    {
+        "type": "text",
+        "text": "A-RAG MinerU UI smoke test",
+        "text_level": 2,
+        "bbox": [
+            115,
+            126,
+            539,
+            148
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "This PDF verifies API output reaches the review UI.",
+        "bbox": [
+            115,
+            167,
+            542,
+            184
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Provenance: page 1, source element from MinerU.",
+        "bbox": [
+            115,
+            192,
+            537,
+            209
+        ],
+        "page_idx": 0
+    }
+]

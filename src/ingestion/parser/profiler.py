@@ -5,7 +5,7 @@ Directory Lock: src/ingestion/parser/
 
 The Profiler is the FIRST agent in the parsing chain. It inspects a raw file
 BEFORE any content extraction begins and produces a ProfilerResult that tells
-downstream agents (layout_parser, skills, md_to_json) exactly HOW to process it.
+the ingestion orchestrator exactly HOW to process it.
 
 Decision Logic:
   1. Read file bytes → compute SHA-256 fingerprint (deduplication gate).
@@ -28,6 +28,7 @@ from src.ingestion.parser.models import (
     ExtractionStrategy,
     FileCategory,
     FileFingerprint,
+    ParserEngine,
     ProfilerResult,
 )
 
@@ -62,6 +63,7 @@ _EXT_TO_CATEGORY: dict[str, FileCategory] = {
     "png": FileCategory.IMAGE,
     "jpg": FileCategory.IMAGE,
     "jpeg": FileCategory.IMAGE,
+    "jp2": FileCategory.IMAGE,
     "gif": FileCategory.IMAGE,
     "bmp": FileCategory.IMAGE,
     "svg": FileCategory.IMAGE,
@@ -102,6 +104,53 @@ _CATEGORY_TO_BASE_STRATEGY: dict[FileCategory, ExtractionStrategy] = {
     FileCategory.IMAGE: ExtractionStrategy.VLM_ONLY,
     FileCategory.CODE: ExtractionStrategy.CODE_PARSE,
     FileCategory.UNKNOWN: ExtractionStrategy.DIRECT_TEXT,
+}
+
+_MINERU_EXTENSIONS = {
+    "pdf",
+    "docx",
+    "pptx",
+    "xlsx",
+    "png",
+    "jpg",
+    "jpeg",
+    "jp2",
+    "webp",
+    "gif",
+    "bmp",
+}
+
+_NATIVE_EXTENSIONS = {
+    "md",
+    "markdown",
+    "txt",
+    "text",
+    "log",
+    "csv",
+    "tsv",
+    "py",
+    "js",
+    "ts",
+    "java",
+    "cpp",
+    "c",
+    "h",
+    "go",
+    "rs",
+    "rb",
+    "php",
+    "sql",
+    "sh",
+    "bash",
+    "yaml",
+    "yml",
+    "json",
+    "xml",
+    "html",
+    "css",
+    "toml",
+    "ini",
+    "cfg",
 }
 
 
@@ -156,24 +205,56 @@ class DocumentProfiler:
         content_bytes = self._read_file_bytes(file_path)
         fingerprint = self._compute_fingerprint(content_bytes, file_path)
 
-        # Step 2: Classify by extension
-        category = self._classify_category(ext, content_bytes)
+        return self._build_result(
+            file_name=file_name,
+            ext=ext,
+            content_bytes=content_bytes,
+            fingerprint=fingerprint,
+            file_path=file_path,
+        )
 
-        # Step 3: Detect features via content heuristics
+    def profile_content(
+        self,
+        content: str,
+        file_name: str = "document.md",
+    ) -> ProfilerResult:
+        """Profile in-memory text using the same rules as :meth:`profile`.
+
+        Raw ingestion requests do not have a filesystem path, so the
+        orchestrator uses this method to keep classification and fingerprinting
+        consistent with file-based ingestion.
+        """
+        content_bytes = content.encode("utf-8")
+        ext = os.path.splitext(os.path.basename(file_name))[1].lower().lstrip(".")
+        fingerprint = self._compute_fingerprint(content_bytes, file_name)
+        return self._build_result(
+            file_name=os.path.basename(file_name),
+            ext=ext,
+            content_bytes=content_bytes,
+            fingerprint=fingerprint,
+            file_path=file_name,
+        )
+
+    def _build_result(
+        self,
+        file_name: str,
+        ext: str,
+        content_bytes: bytes,
+        fingerprint: FileFingerprint,
+        file_path: str,
+    ) -> ProfilerResult:
+        """Build a typed profiler result from already-read source bytes."""
+        category = self._classify_category(ext, content_bytes)
         features = self._detect_features(
             content_bytes=content_bytes,
             ext=ext,
             category=category,
             file_path=file_path,
         )
-
-        # Step 4: Select extraction strategy
         strategy = self._select_strategy(category, features, ext)
-
-        # Step 5: Detect language hint
+        recommended_engine = self._recommended_engine(ext)
         language_hint = self._detect_language(content_bytes, ext)
 
-        # Build profiler notes
         notes_parts = []
         if features["has_tables"]:
             notes_parts.append("tables_detected")
@@ -182,13 +263,16 @@ class DocumentProfiler:
         if features["has_code_blocks"]:
             notes_parts.append("code_blocks_detected")
         if strategy != _CATEGORY_TO_BASE_STRATEGY.get(category):
-            notes_parts.append(f"strategy_overridden_from_{_CATEGORY_TO_BASE_STRATEGY.get(category, 'unknown')}")
+            notes_parts.append(
+                f"strategy_overridden_from_{_CATEGORY_TO_BASE_STRATEGY.get(category, 'unknown')}"
+            )
 
         result = ProfilerResult(
             file_name=file_name,
             file_type=ext or "unknown",
             category=category,
             strategy=strategy,
+            recommended_engine=recommended_engine,
             fingerprint=fingerprint,
             has_tables=features["has_tables"],
             has_images=features["has_images"],
@@ -205,8 +289,16 @@ class DocumentProfiler:
             f"tables={result.has_tables}, images={result.has_images}, "
             f"code={result.has_code_blocks}, pages≈{result.estimated_pages}"
         )
-
         return result
+
+    @staticmethod
+    def _recommended_engine(ext: str) -> ParserEngine:
+        """Describe the execution engine for the LLM as profiler evidence."""
+        if ext in _MINERU_EXTENSIONS:
+            return "mineru"
+        if ext in _NATIVE_EXTENSIONS:
+            return "native"
+        return "unsupported"
 
     # -----------------------------------------------------------------
     # Private implementation methods
