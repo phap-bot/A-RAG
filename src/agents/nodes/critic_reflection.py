@@ -9,6 +9,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agents.orchestrator.state import AgentState, CriticVerdict
+from src.agents.nodes.provenance import validate_response_provenance
 from src.core.config import logger, settings
 from src.core.llm_client import get_chat_llm
 from src.core.prompts import (
@@ -57,6 +58,26 @@ def critic_reflection_node(state: AgentState) -> Dict[str, Any]:
     else:
         verdict = _deterministic_evaluation(candidate_response, retrieved_docs, retry_count, max_retries)
 
+    provenance = validate_response_provenance(
+        candidate_response,
+        retrieved_docs,
+        graph_context,
+    )
+    has_reference = bool(provenance["cited_chunk_ids"] or provenance["cited_graph_ids"])
+    if not provenance["valid"] or (retrieved_docs and not has_reference):
+        verdict = verdict.model_copy(
+            update={
+                "passed": False,
+                "citation_accuracy_score": 0.0,
+                "should_reformulate": True,
+                "critique_feedback": (
+                    f"Provenance gate rejected the candidate: "
+                    f"unknown_chunks={provenance['unknown_chunk_ids']}, "
+                    f"unknown_graph={provenance['unknown_graph_ids']}"
+                ),
+            }
+        )
+
     new_retry_count = retry_count + 1
     logger.info(
         f"Critic verdict: passed={verdict.passed}, faithfulness={verdict.faithfulness_score}, relevance={verdict.relevance_score}, next_retry={new_retry_count}"
@@ -65,6 +86,7 @@ def critic_reflection_node(state: AgentState) -> Dict[str, Any]:
     return {
         "critique": verdict,
         "retry_count": new_retry_count,
+        "provenance_validation": provenance,
     }
 
 
@@ -97,7 +119,8 @@ def _deterministic_evaluation(
     max_retries: int,
 ) -> CriticVerdict:
     """Evaluate response based on citation presence, content alignment, and grounding."""
-    has_citations = "[Chunk:" in response or "[Graph:" in response
+    provenance = validate_response_provenance(response, chunks, [])
+    has_citations = bool(provenance["cited_chunk_ids"])
     has_content = len(response.strip()) > 30 and bool(chunks)
 
     # In test/mock: if retry_count == 0 and special test query requests reflection, simulate a first-attempt feedback

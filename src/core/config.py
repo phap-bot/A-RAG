@@ -1,10 +1,9 @@
 """System configuration and structured JSON logging setup using Pydantic Settings and Loguru."""
 
-import os
 import sys
 from typing import Literal, Optional
 from loguru import logger
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,7 +28,7 @@ class Settings(BaseSettings):
 
     # API Configuration
     api_host: str = Field(default="0.0.0.0", description="FastAPI host")
-    api_port: int = Field(default=8000, description="FastAPI port")
+    api_port: int = Field(default=8010, description="FastAPI port; MinerU occupies 8000 by default")
     api_prefix: str = Field(default="/api/v1", description="FastAPI route prefix")
 
     # LLM & Embedding Settings
@@ -38,9 +37,9 @@ class Settings(BaseSettings):
     primary_llm_model: str = Field(default="gpt-4o", description="Primary Chat LLM model")
     vlm_model_name: str = Field(default="gpt-4o", description="Vision-Language Model for multimodal ingestion")
     embedding_model_name: str = Field(
-        default="text-embedding-3-small", description="Embedding model name"
+        default="BAAI/bge-m3", description="Local embedding model name"
     )
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    embedding_dimension: int = Field(default=1024, description="Embedding vector dimension")
 
     # Agentic Reflection Loop
     max_reflection_retries: int = Field(
@@ -48,17 +47,53 @@ class Settings(BaseSettings):
     )
 
     # Vector Database Settings
-    vector_db_provider: Literal["qdrant", "milvus", "elasticsearch", "mock"] = Field(
-        default="qdrant", description="Vector database provider"
+    vector_db_provider: Literal["neo4j"] = Field(
+        default="neo4j", description="Vector and graph storage provider"
     )
-    qdrant_url: str = Field(default="http://localhost:6333", description="Qdrant service URL")
-    qdrant_api_key: Optional[str] = Field(default=None, description="Qdrant API key")
-    qdrant_collection: str = Field(default="enterprise_kb", description="Default Qdrant collection name")
 
     # Knowledge Graph (Neo4j) Settings
     neo4j_uri: str = Field(default="bolt://localhost:7687", description="Neo4j bolt URI")
     neo4j_user: str = Field(default="neo4j", description="Neo4j username")
     neo4j_password: str = Field(default="password123", description="Neo4j password")
+    neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
+    neo4j_vector_index: str = Field(default="chunk_embedding_bge_m3", description="Neo4j Chunk vector index")
+    neo4j_fulltext_index: str = Field(default="chunk_content_fulltext", description="Neo4j Chunk full-text index")
+    neo4j_vector_query_mode: Literal["search", "procedure"] = Field(
+        default="search",
+        description="Neo4j vector query syntax; use procedure for pre-2026.01 servers",
+    )
+    neo4j_enabled: bool = Field(default=False, description="Enable live Neo4j persistence and retrieval")
+    neo4j_auto_schema: bool = Field(default=True, description="Create/check Neo4j constraints and indexes on startup")
+    neo4j_connection_timeout_seconds: float = Field(default=10.0, ge=1.0, description="Neo4j connectivity timeout")
+    neo4j_max_connection_pool_size: int = Field(default=50, ge=1, description="Neo4j driver connection pool size")
+    neo4j_vector_oversampling: int = Field(default=5, ge=1, le=20, description="Vector candidates fetched before metadata filtering")
+    neo4j_rrf_k: int = Field(default=60, ge=1, description="Reciprocal-rank fusion constant")
+    retrieval_top_k: int = Field(default=5, ge=1, le=50, description="Maximum chunks returned to Zone 2")
+    retrieval_parallel_workers: int = Field(default=4, ge=1, le=16, description="Parallel retrieval worker count")
+    neo4j_graph_max_hops: int = Field(default=2, ge=1, le=5, description="Maximum graph expansion depth")
+
+    # Chunking controls are shared by the web ingestion boundary and any
+    # background worker. Keeping them in settings prevents a deployment from
+    # silently changing the indexed context window in application code.
+    chunk_max_tokens: int = Field(default=400, ge=16, description="Maximum estimated tokens per chunk")
+    chunk_overlap_tokens: int = Field(default=40, ge=0, description="Trailing overlap for text chunks")
+
+    # Embeddings are explicit because Neo4j can store text/full-text chunks
+    # without a vector, but vector retrieval must never pretend a vector exists.
+    embedding_enabled: bool = Field(default=False, description="Generate/store embeddings for Neo4j vector search")
+    embedding_provider: Literal["bge_m3", "openai", "none"] = Field(
+        default="bge_m3", description="Embedding provider"
+    )
+    embedding_batch_size: int = Field(default=64, ge=1, le=512, description="Embedding request batch size")
+    embedding_device: Literal["auto", "cpu", "cuda"] = Field(
+        default="auto", description="Local embedding inference device"
+    )
+    embedding_normalize: bool = Field(
+        default=True, description="L2-normalize embeddings before Neo4j cosine search"
+    )
+    embedding_cache_dir: str = Field(
+        default=".models", description="Local cache directory for downloaded embedding models"
+    )
 
     # Cache & Task Queue (Redis & Celery)
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
@@ -67,6 +102,12 @@ class Settings(BaseSettings):
     )
     celery_result_backend: str = Field(
         default="redis://localhost:6379/2", description="Celery result backend URL"
+    )
+    ingestion_worker_count: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="Number of in-process ingestion workers for the local web runtime",
     )
 
     # MCP Server Settings
@@ -78,9 +119,49 @@ class Settings(BaseSettings):
     ragas_enabled: bool = Field(default=True, description="Enable RAGAs metric calculation")
     backlog_dir: str = Field(default="backlog", description="Directory storing hallucination and error backlogs")
 
+    # MinerU API ingestion backend
+    mineru_base_url: str = Field(default="http://localhost:8000", description="MinerU API base URL")
+    mineru_api_key: Optional[str] = Field(default=None, description="Optional MinerU API bearer token")
+    mineru_backend: str = Field(default="pipeline", description="MinerU backend (pipeline or vlm)")
+    mineru_parse_method: str = Field(default="auto", description="MinerU parse method")
+    mineru_timeout_seconds: float = Field(default=600.0, ge=1.0, description="MinerU request timeout")
+    mineru_max_retries: int = Field(default=2, ge=0, le=5, description="MinerU transient retry count")
+    mineru_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, description="MinerU retry backoff")
+    mineru_artifact_dir: str = Field(
+        default=".artifacts/mineru",
+        description="Local directory for downloaded MinerU zip artifacts",
+    )
+
+    @model_validator(mode="after")
+    def validate_cross_field_limits(self) -> "Settings":
+        """Reject configurations that would make chunking or vector search invalid."""
+        if self.chunk_overlap_tokens >= self.chunk_max_tokens:
+            raise ValueError("CHUNK_OVERLAP_TOKENS must be smaller than CHUNK_MAX_TOKENS")
+        if self.embedding_enabled and self.embedding_provider == "none":
+            raise ValueError("EMBEDDING_PROVIDER must be configured when EMBEDDING_ENABLED=true")
+        return self
+
 
 def setup_logger(settings: Settings) -> None:
-    """Configure Loguru logger with JSON formatting for MCP and system-wide observability."""
+    """Configure structured logging with a UTF-8-safe process output stream.
+
+    Windows can expose ``sys.stdout`` as ``cp1252``.  That encoding cannot
+    serialize valid Unicode document content or structured log messages, so
+    Loguru's queued writer can emit a secondary ``UnicodeEncodeError`` while
+    the actual request is still running.  UTF-8 is the process log contract;
+    ``backslashreplace`` preserves the event instead of allowing logging to
+    interrupt application diagnostics.
+    """
+    stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(stdout_reconfigure):
+        try:
+            stdout_reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):
+            # Embedded hosts and test capture streams may not permit stream
+            # reconfiguration.  They generally provide their own Unicode-safe
+            # writer, so logger setup should remain non-fatal in that case.
+            pass
+
     logger.remove()
 
     if settings.log_format_json:

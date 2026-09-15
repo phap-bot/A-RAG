@@ -34,6 +34,11 @@ class ParsingError(IngestionError):
     pass
 
 
+class MinerUError(IngestionError):
+    """Raised when the MinerU API cannot parse or return a source artifact."""
+    pass
+
+
 class RetrievalError(AppException):
     """Base exception for retrieval failures."""
     pass

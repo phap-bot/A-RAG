@@ -29,7 +29,20 @@ def synthesizer_node(state: AgentState) -> Dict[str, Any]:
     # Format chunks context
     chunks_str_list = []
     for chunk in retrieved_docs:
-        chunk_repr = f"[{chunk.chunk_id}] (Modality: {chunk.modality}, Source: {chunk.source_doc})\n{chunk.content}"
+        metadata = chunk.metadata or {}
+        section_path = chunk.section_path or metadata.get("section_path", [])
+        page_numbers = chunk.page_numbers or metadata.get("page_numbers", [])
+        lineage = []
+        if section_path:
+            lineage.append(f"Section: {' > '.join(section_path)}")
+        if page_numbers:
+            lineage.append(f"Pages: {', '.join(map(str, page_numbers))}")
+        if chunk.parent_chunk_id or metadata.get("parent_chunk_id"):
+            lineage.append(
+                f"Parent: {chunk.parent_chunk_id or metadata.get('parent_chunk_id')}"
+            )
+        lineage_text = f", {'; '.join(lineage)}" if lineage else ""
+        chunk_repr = f"[{chunk.chunk_id}] (Modality: {chunk.modality}, Source: {chunk.source_doc}{lineage_text})\n{chunk.content}"
         if chunk.vlm_caption:
             chunk_repr += f"\n[VLM Description]: {chunk.vlm_caption}"
         chunks_str_list.append(chunk_repr)

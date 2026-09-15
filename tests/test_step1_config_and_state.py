@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+import src.core.config as config_module
 from src.core.config import Settings, settings, setup_logger
 from src.core.exceptions import (
     AppException,
@@ -38,21 +39,48 @@ def test_settings_defaults():
     cfg = Settings()
     assert cfg.app_name == "Enterprise-Agentic-RAG-BaaS"
     assert cfg.max_reflection_retries == 3
-    assert cfg.vector_db_provider in ["qdrant", "milvus", "elasticsearch", "mock"]
+    assert cfg.vector_db_provider == "neo4j"
     assert cfg.log_format_json is True
-    assert cfg.embedding_dimension == 1536
+    assert cfg.embedding_model_name == "BAAI/bge-m3"
+    assert cfg.embedding_dimension == 1024
+    assert cfg.embedding_provider == "bge_m3"
+
+
+def test_setup_logger_normalizes_reconfigurable_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure Windows cp1252 stdout is normalized before Loguru adds sinks."""
+
+    class FakeStdout:
+        encoding = "cp1252"
+
+        def __init__(self) -> None:
+            self.reconfigure_kwargs: dict[str, str] | None = None
+
+        def reconfigure(self, **kwargs: str) -> None:
+            self.reconfigure_kwargs = kwargs
+
+    stdout = FakeStdout()
+    monkeypatch.setattr(config_module.sys, "stdout", stdout)
+    monkeypatch.setattr(config_module.logger, "remove", lambda: None)
+    monkeypatch.setattr(config_module.logger, "add", lambda *args, **kwargs: None)
+
+    setup_logger(Settings())
+
+    assert stdout.reconfigure_kwargs == {
+        "encoding": "utf-8",
+        "errors": "backslashreplace",
+    }
 
 
 def test_custom_exceptions():
     """Verify exception hierarchy and JSON serializable dictionary generation."""
-    err = VectorDBError("Connection timeout to Qdrant", details={"host": "localhost", "port": 6333})
+    err = VectorDBError("Connection timeout to Neo4j vector index", details={"host": "localhost", "port": 7687})
     assert isinstance(err, RetrievalError)
     assert isinstance(err, AppException)
 
     err_dict = err.to_dict()
     assert err_dict["error_type"] == "VectorDBError"
     assert "timeout" in err_dict["message"]
-    assert err_dict["details"]["port"] == 6333
+    assert err_dict["details"]["port"] == 7687
 
     retry_err = MaxRetriesExceededError("Reflection loop failed 3 times")
     assert isinstance(retry_err, CriticReflectionError)

@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api import main
 from src.api.service import WebApplicationService
+from src.core.config import settings
 
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    monkeypatch.setattr(settings, "neo4j_enabled", False)
+    monkeypatch.setattr(settings, "embedding_enabled", False)
     web_service = WebApplicationService(tmp_path / "web")
     monkeypatch.setattr(main, "service", web_service)
     with TestClient(main.app) as test_client:
@@ -56,17 +60,43 @@ def test_upload_runs_parser_chunking_and_provenance_contract(client: TestClient)
     )
     assert upload.status_code == 200, upload.text
     document = upload.json()
-    assert document["status"] == "indexed"
+    assert document["status"] == "uploaded"
     assert document["upload_action"] == "created"
     assert document["source_path"] == "uploads/architecture.md"
 
     document_id = document["id"]
+    uploaded_status = client.get(
+        "/v1/ingestion/status",
+        params={"workspace_id": workspace_id, "document_id": document_id},
+    )
+    assert uploaded_status.json()["status"] == "uploaded"
+    assert uploaded_status.json()["readiness"] == "not_ready"
+
+    start = client.post(
+        "/v1/documents/actions/sync-up",
+        json={"workspace_id": workspace_id, "document_ids": [document_id]},
+    )
+    assert start.status_code == 200, start.text
+    assert start.json()["accepted"] == [document_id]
+    assert start.json()["jobs"][0]["status"] == "processing"
+
+    for _ in range(100):
+        status_response = client.get(
+            "/v1/ingestion/status",
+            params={"workspace_id": workspace_id, "document_id": document_id},
+        )
+        if status_response.json()["status"] == "indexed":
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail(f"ingestion did not complete: {status_response.json()}")
+
     status_response = client.get(
         "/v1/ingestion/status",
         params={"workspace_id": workspace_id, "document_id": document_id},
     )
     assert status_response.json()["readiness"] == "ready"
-    assert status_response.json()["stage"] == "validated"
+    assert status_response.json()["stage"] == "indexed"
     assert status_response.json()["chunk_count"] >= 1
 
     metadata = client.get(f"/v1/workspaces/{workspace_id}/documents/{document_id}/metadata").json()
@@ -89,6 +119,19 @@ def test_query_and_assistant_return_grounded_chunk_references(client: TestClient
         params={"filename": "facts.txt", "content_type": "text/plain"},
         content=b"The provenance gate validates every chunk before indexing.",
     )
+    document_id = client.get("/v1/documents", params={"workspace_id": workspace_id}).json()[0]["id"]
+    start = client.post(
+        "/v1/documents/actions/sync-up",
+        json={"workspace_id": workspace_id, "document_ids": [document_id]},
+    )
+    assert start.status_code == 200
+    for _ in range(100):
+        if client.get(
+            "/v1/ingestion/status",
+            params={"workspace_id": workspace_id, "document_id": document_id},
+        ).json()["status"] == "indexed":
+            break
+        time.sleep(0.01)
 
     answer = client.post(
         "/v1/query",

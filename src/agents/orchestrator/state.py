@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 from pydantic import BaseModel, Field
 
 
-ModalityType = Literal["text", "table", "image", "chart"]
+ModalityType = Literal["text", "table", "image", "chart", "code"]
 SourceType = Literal["vector_dense", "bm25", "neo4j_graph", "hybrid"]
 
 
@@ -23,6 +23,15 @@ class RetrievedChunk(BaseModel):
     score: float = Field(default=0.0, ge=0.0, description="Relevance or similarity score")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary chunk metadata (page, section, etc.)")
     vlm_caption: Optional[str] = Field(default=None, description="Detailed VLM description if modality is image/chart")
+
+    # Optional top-level projections of ContentChunk lineage. Storage adapters
+    # may keep the same values nested in ``metadata``; these fields make the
+    # contract directly usable by Zone 2 when a backend returns them flattened.
+    document_id: Optional[str] = Field(default=None, description="Parent document ID")
+    page_numbers: List[int] = Field(default_factory=list, description="Source pages")
+    element_ids: List[str] = Field(default_factory=list, description="Source ParsedElement IDs")
+    section_path: List[str] = Field(default_factory=list, description="Heading breadcrumb")
+    parent_chunk_id: Optional[str] = Field(default=None, description="Nearest heading/parent chunk")
 
 
 class CriticVerdict(BaseModel):
@@ -72,6 +81,8 @@ class AgentState(TypedDict):
     """
 
     query: str
+    workspace_id: str
+    file_paths: List[str]
     history: List[Dict[str, str]]
     formulated_queries: List[str]
     graph_queries: List[str]
@@ -81,6 +92,8 @@ class AgentState(TypedDict):
     critique: Optional[CriticVerdict]
     retry_count: int
     max_retries: int
+    retrieval_trace: Dict[str, Any]
+    provenance_validation: Dict[str, Any]
     errors: List[str]
 
 
@@ -88,10 +101,14 @@ def create_initial_agent_state(
     query: str,
     history: Optional[List[Dict[str, str]]] = None,
     max_retries: int = 3,
+    workspace_id: str = "",
+    file_paths: Optional[List[str]] = None,
 ) -> AgentState:
     """Helper to initialize a clean AgentState container."""
     return AgentState(
         query=query,
+        workspace_id=workspace_id,
+        file_paths=file_paths or [],
         history=history or [],
         formulated_queries=[query],
         graph_queries=[],
@@ -101,6 +118,8 @@ def create_initial_agent_state(
         critique=None,
         retry_count=0,
         max_retries=max_retries,
+        retrieval_trace={},
+        provenance_validation={},
         errors=[],
     )
 

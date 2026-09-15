@@ -1,86 +1,141 @@
-"""MCP Knowledge Base Retrieval Tools (JSON-RPC Compatible Tool Definitions).
+"""Retrieval tools used by Zone 2 and exposed by the MCP gateway.
 
-ZONE 3: MCP Gateway & Data Infrastructure.
-Exposes standard tool schemas for querying the Vector DB and Knowledge Graph.
+These functions contain no retrieval fixtures and no routing heuristics.  They
+validate the workspace boundary, obtain the configured Neo4j repository, and
+delegate storage/query work to that repository. A missing Neo4j connection is
+an explicit error; production must not silently receive synthetic chunks.
 """
 
-from typing import Any, Dict, List
-from src.core.config import logger
+from __future__ import annotations
+
+from typing import Any
+from threading import Lock
+
+from src.core.config import logger, settings
+from src.core.exceptions import ConfigurationError, GraphDBError
+from src.retrieval.embeddings import EmbeddingProvider, build_embedding_provider
+from src.retrieval.neo4j_repository import Neo4jRepository
+
+
+_repository: Neo4jRepository | None = None
+_embedding_provider: EmbeddingProvider | None = None
+_repository_lock = Lock()
+
+
+def configure_retrieval(
+    *,
+    repository: Neo4jRepository | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
+) -> None:
+    """Inject repository/provider instances for application wiring or tests."""
+    global _repository, _embedding_provider
+    _repository = repository
+    _embedding_provider = embedding_provider
+
+
+def _get_repository() -> Neo4jRepository:
+    global _repository
+    if not settings.neo4j_enabled and _repository is None:
+        raise ConfigurationError(
+            "Neo4j retrieval is disabled",
+            details={"set": "NEO4J_ENABLED=true", "provider": settings.vector_db_provider},
+        )
+    if _repository is None:
+        with _repository_lock:
+            if _repository is None:
+                _repository = Neo4jRepository.from_settings()
+                _repository.prepare()
+    return _repository
+
+
+def _get_embedding_provider() -> EmbeddingProvider | None:
+    global _embedding_provider
+    if _embedding_provider is None and settings.embedding_enabled:
+        _embedding_provider = build_embedding_provider()
+    return _embedding_provider
+
+
+def _require_workspace(workspace_id: str) -> str:
+    if not workspace_id.strip():
+        raise GraphDBError(
+            "workspace_id is required for retrieval isolation",
+            details={"policy": "no_cross_workspace_search"},
+        )
+    return workspace_id
+
+
+def _file_paths(filter_metadata: dict[str, Any] | None) -> list[str]:
+    if not filter_metadata:
+        return []
+    paths = filter_metadata.get("file_paths", [])
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise ValueError("filter_metadata.file_paths must be a list of strings")
+    return paths
 
 
 def search_knowledge_base(
     query: str,
-    limit: int = 5,
-    filter_metadata: Dict[str, Any] | None = None,
-) -> List[Dict[str, Any]]:
-    """MCP Tool: Search Knowledge Base via Hybrid Retrieval (Dense Vector + BM25).
-    
-    Args:
-        query: Search query string.
-        limit: Maximum number of chunks to retrieve.
-        filter_metadata: Optional metadata filter parameters.
-        
-    Returns:
-        List of serialized chunk dictionaries matching RetrievedChunk schema.
+    limit: int | None = None,
+    filter_metadata: dict[str, Any] | None = None,
+    *,
+    workspace_id: str = "",
+) -> list[dict[str, Any]]:
+    """Search Neo4j Chunk nodes using vector and full-text retrieval.
+
+    The workspace is mandatory even though it is keyword-only. When
+    embeddings are enabled, the query is embedded and fused with Neo4j
+    full-text ranks using repository-level reciprocal-rank fusion. When
+    embeddings are disabled, the lexical channel remains available with
+    ``source_type='bm25'`` and no fake vector score is produced.
     """
-    logger.info(f"Executing MCP Tool 'search_knowledge_base': query='{query}', limit={limit}")
-    
-    # In live mode this calls Qdrant / BM25; in mock/test mode returns structured responses
-    results = [
-        {
-            "chunk_id": f"chunk-auto-{abs(hash(query)) % 10000}",
-            "content": f"Verified documentation for query: {query}. Contains architecture guidelines and standard operations.",
-            "modality": "text",
-            "source_type": "hybrid",
-            "source_doc": "enterprise_architecture_guide.md",
-            "score": 0.94,
-            "metadata": {"section": "Overview", "page": 1},
-            "vlm_caption": None,
-        },
-        {
-            "chunk_id": f"chunk-table-{abs(hash(query)) % 10000 + 1}",
-            "content": "| Component | Protocol | Description |\n|---|---|---|\n| MCP Gateway | JSON-RPC | Tool execution |\n| LangGraph | Python | Multi-agent loop |",
-            "modality": "table",
-            "source_type": "hybrid",
-            "source_doc": "system_components.xlsx",
-            "score": 0.88,
-            "metadata": {"sheet": "Architecture", "row_count": 2},
-            "vlm_caption": None,
-        },
-    ]
-    return results[:limit]
+    workspace = _require_workspace(workspace_id)
+    repository = _get_repository()
+    provider = _get_embedding_provider()
+    query_embedding = provider.embed_query(query) if provider else None
+    requested = limit or settings.retrieval_top_k
+    logger.info(
+        f"Executing Neo4j retrieval: workspace={workspace} limit={requested} "
+        f"vector={'enabled' if query_embedding else 'disabled'}"
+    )
+    return repository.search_hybrid(
+        workspace_id=workspace,
+        keyword_query=query,
+        query_embedding=query_embedding,
+        top_k=requested,
+        file_paths=_file_paths(filter_metadata),
+    )
 
 
 def query_knowledge_graph(
     entity_query: str,
-    max_hops: int = 2,
-) -> List[Dict[str, Any]]:
-    """MCP Tool: Query Neo4j Knowledge Graph for related entities and relationships.
-    
-    Args:
-        entity_query: Entity name or type to expand.
-        max_hops: Graph traversal distance.
-        
-    Returns:
-        List of serialized graph relationship dicts.
-    """
-    logger.info(f"Executing MCP Tool 'query_knowledge_graph': entity='{entity_query}', hops={max_hops}")
-    
-    # In live mode this executes Cypher queries via Neo4j; in test mode returns structured triples
-    return [
-        {
-            "source_node": entity_query,
-            "relationship": "INTERACTS_WITH",
-            "target_node": "MCPGateway",
-            "properties": {"protocol": "JSON-RPC", "auth": "bearer"},
-        },
-        {
-            "source_node": entity_query,
-            "relationship": "ORCHESTRATED_BY",
-            "target_node": "LangGraphEngine",
-            "properties": {"state_type": "SharedState"},
-        },
-    ]
+    max_hops: int | None = None,
+    *,
+    workspace_id: str = "",
+) -> list[dict[str, Any]]:
+    """Expand Neo4j provenance/entity relationships within one workspace."""
+    workspace = _require_workspace(workspace_id)
+    return _get_repository().query_graph(
+        workspace_id=workspace,
+        entity_query=entity_query,
+        max_hops=max_hops or settings.neo4j_graph_max_hops,
+        limit=settings.retrieval_top_k,
+    )
 
 
-__all__ = ["search_knowledge_base", "query_knowledge_graph"]
+def get_evidence(*, workspace_id: str, chunk_id: str) -> dict[str, Any]:
+    """Resolve one exact Chunk node for a citation/evidence request."""
+    result = _get_repository().get_chunk(workspace_id=_require_workspace(workspace_id), chunk_id=chunk_id)
+    if result is None:
+        raise GraphDBError(
+            "Evidence chunk was not found in Neo4j",
+            details={"workspace_id": workspace_id, "chunk_id": chunk_id},
+        )
+    return result
+
+
+__all__ = [
+    "configure_retrieval",
+    "get_evidence",
+    "query_knowledge_graph",
+    "search_knowledge_base",
+]
