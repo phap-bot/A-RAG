@@ -30,7 +30,6 @@ import {
 } from 'lucide-react'
 
 import {
-  askKnowledgeBase,
   deleteDocuments,
   downloadDocument,
   executeAssistantTool,
@@ -43,6 +42,7 @@ import {
   getWorkspaceMembers,
   getWorkspaceOverview,
   getWorkspaceSettings,
+  streamKnowledgeBase,
 
   importDocuments,
   moveDocuments,
@@ -52,7 +52,9 @@ import {
   downloadWorkspaceGraphml,
 } from '../api'
 import { CitationEvidenceList } from '../components/CitationEvidenceList'
+import { CollapsibleReasoning } from '../components/CollapsibleReasoning'
 import { DocumentTable } from '../components/DocumentTable'
+import { DocumentReviewWorkbench } from '../components/DocumentReviewWorkbench'
 import { KnowledgeGraphPanel } from '../components/KnowledgeGraphPanel'
 import { AssistantToolComposer } from '../components/assistant/AssistantToolComposer'
 import { ToolResultRenderer } from '../components/assistant/ToolResultRenderer'
@@ -60,13 +62,14 @@ import { Button } from '../components/ui/Button'
 import { Select } from '../components/ui/Select'
 import { AgentConnectionsPage } from './AgentConnectionsPage'
 import { EvaluationPage } from './EvaluationPage'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 import type {
   ChatSessionSummary,
   DocumentRow,
   AssistantToolDefinition,
   AssistantToolExecution,
   AssistantToolName,
+  AgentStreamActivity,
+  AgentStreamEvent,
   QueryResponse,
   UiBootstrap,
   WorkspaceMember,
@@ -155,17 +158,6 @@ type UploadDiffNotice = {
   updated: UploadNotice[]
 }
 
-type ProjectSessionState = {
-  search: string
-  selectedIds: string[]
-  question: string
-  activeChatSessionId: string | null
-  attachedDocumentIds: string[]
-  historyOpen: boolean
-  selectedToolName: string | null
-  feedbackByAnswerId: Record<string, 'positive' | 'negative'>
-}
-
 function folderRelativePath(file: File): string {
   return ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name).replace(/\\/g, '/')
 }
@@ -193,6 +185,20 @@ type ChatTurn = {
   error: string | null
   pending: boolean
   feedback: 'positive' | 'negative' | null
+  activity?: AgentStreamActivity[]
+}
+
+function streamActivityFromEvent(event: AgentStreamEvent, turnId: string): AgentStreamActivity | null {
+  if (event.event === 'agent_thought') {
+    return { id: `${turnId}-${event.run_id || event.node}`, kind: 'thought', label: event.message, details: event.details }
+  }
+  if (event.event === 'tool_start') {
+    return { id: `${turnId}-${event.run_id || event.tool_name}-start`, kind: 'tool', label: `${event.tool_name} started` }
+  }
+  if (event.event === 'tool_result') {
+    return { id: `${turnId}-${event.run_id || event.tool_name}-result`, kind: 'tool', label: `${event.tool_name} completed` }
+  }
+  return null
 }
 
 function inlineAnswerText(text: string) {
@@ -260,23 +266,36 @@ export function ProjectPage({
   const [attachedDocumentIds, setAttachedDocumentIds] = useState<string[]>([])
   const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null)
   const [uploadDiffNotice, setUploadDiffNotice] = useState<UploadDiffNotice | null>(null)
+  const [reviewDocumentId, setReviewDocumentId] = useState<string | null>(null)
+  const [assistantOpen, setAssistantOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const deleteCancelRef = useRef<HTMLButtonElement>(null)
   const conversationRef = useRef<HTMLDivElement>(null)
   const currentWorkspaceIdRef = useRef(workspace.workspace_id)
   const workspaceRequestEpochRef = useRef(0)
-  const sessionHydrationPendingRef = useRef(false)
   if (currentWorkspaceIdRef.current !== workspace.workspace_id) {
     currentWorkspaceIdRef.current = workspace.workspace_id
     workspaceRequestEpochRef.current += 1
   }
   const locale = localeMap[(i18n.resolvedLanguage || 'vi').split('-')[0]] || 'vi-VN'
-  const projectSessionKey = sessionStorageKey('project', `${bootstrap.session.email || bootstrap.session.display_name}:${workspace.workspace_id}`)
   const attachedDocuments = useMemo(
     () => documents.filter((document) => attachedDocumentIds.includes(document.id)),
     [attachedDocumentIds, documents],
   )
+  const primaryDocumentId = documents[0]?.id || ''
+  const primaryDocumentStatus = documents[0]?.status || ''
+  const hasProcessingDocuments = documents.some((document) => document.status === 'processing')
+  const reviewDocument = documents.find((document) => document.id === reviewDocumentId) || null
+
+  useEffect(() => {
+    if (!assistantOpen) return
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setAssistantOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [assistantOpen])
 
   const attachmentFromPath = useCallback((sourcePath: string): ChatAttachment => {
     const match = documents.find((document) => document.sourcePath === sourcePath)
@@ -323,8 +342,6 @@ export function ProjectPage({
   }, [initialSection, workspace.workspace_id])
 
   useEffect(() => {
-    const saved = readSessionState<ProjectSessionState>(projectSessionKey)
-    sessionHydrationPendingRef.current = true
     setSelectedIds(new Set())
     setSearch('')
     setQuestion('')
@@ -340,47 +357,24 @@ export function ProjectPage({
     setUploadDiffNotice(null)
     setSyncNotice(null)
     setKnowledgeGraph(null)
-    setSearch(saved?.search || '')
-    setSelectedIds(new Set(saved?.selectedIds || []))
-    setQuestion(saved?.question || '')
-    setActiveChatSessionId(saved?.activeChatSessionId || null)
-    setAttachedDocumentIds(saved?.attachedDocumentIds || [])
-    setHistoryOpen(Boolean(saved?.historyOpen))
-    setFeedbackByAnswerId(saved?.feedbackByAnswerId || {})
+    setSearch('')
+    setQuestion('')
+    setActiveChatSessionId(null)
+    setAttachedDocumentIds([])
+    setHistoryOpen(false)
+    setFeedbackByAnswerId({})
     getWorkspaceSettings(workspace.workspace_id).then(setWorkspaceSettings).catch(() => undefined)
     getAssistantToolCatalog(workspace.workspace_id)
       .then((catalog) => {
         setAssistantTools(catalog.composer_tools)
-        const restoredTool = saved?.selectedToolName
-          ? catalog.composer_tools.find((tool) => tool.name === saved.selectedToolName) || null
-          : null
-        setSelectedTool(restoredTool)
-        sessionHydrationPendingRef.current = false
       })
       .catch(() => {
         setAssistantTools([])
-        sessionHydrationPendingRef.current = false
       })
-  }, [projectSessionKey, workspace.workspace_id])
+  }, [workspace.workspace_id])
 
   useEffect(() => {
-    if (sessionHydrationPendingRef.current) {
-      return
-    }
-    writeSessionState<ProjectSessionState>(projectSessionKey, {
-      search,
-      selectedIds: Array.from(selectedIds),
-      question,
-      activeChatSessionId,
-      attachedDocumentIds,
-      historyOpen,
-      selectedToolName: selectedTool?.name || null,
-      feedbackByAnswerId,
-    })
-  }, [activeChatSessionId, attachedDocumentIds, feedbackByAnswerId, historyOpen, projectSessionKey, question, search, selectedIds, selectedTool?.name])
-
-  useEffect(() => {
-    const documentId = documents[0]?.id
+    const documentId = primaryDocumentId
     if (!documentId) {
       setReadiness(null)
       return
@@ -390,7 +384,25 @@ export function ProjectPage({
       .then((status) => { if (!cancelled) setReadiness(status) })
       .catch(() => { if (!cancelled) setReadiness(null) })
     return () => { cancelled = true }
-  }, [documents, workspace.workspace_id])
+  }, [primaryDocumentId, primaryDocumentStatus, workspace.workspace_id])
+
+  useEffect(() => {
+    if (!hasProcessingDocuments) return
+    let cancelled = false
+    const refreshProcessingDocuments = async () => {
+      try {
+        const refreshed = await getDocuments(workspace.workspace_id)
+        if (!cancelled) onDocumentsChange(refreshed)
+      } catch {
+        // The current table state remains valid when a polling request fails.
+      }
+    }
+    const interval = window.setInterval(() => void refreshProcessingDocuments(), 2500)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [hasProcessingDocuments, onDocumentsChange, workspace.workspace_id])
 
   useEffect(() => {
     onSectionChange?.(section)
@@ -403,8 +415,7 @@ export function ProjectPage({
       .then((sessions) => {
         if (cancelled) return
         setChatSessions(sessions)
-        const saved = readSessionState<ProjectSessionState>(projectSessionKey)
-        const sessionId = saved?.activeChatSessionId || sessions[0]?.id
+        const sessionId = sessions[0]?.id
         if (sessionId) void openChatSession(sessionId)
       })
       .catch(() => undefined)
@@ -414,7 +425,7 @@ export function ProjectPage({
     return () => {
       cancelled = true
     }
-  }, [projectSessionKey, workspace.workspace_id])
+  }, [workspace.workspace_id])
 
   useEffect(() => {
     setAttachedDocumentIds((current) => current.filter((documentId) => documents.some((document) => document.id === documentId)))
@@ -654,7 +665,7 @@ export function ProjectPage({
     try {
       const response = await syncDocuments(workspace.workspace_id, documentIds)
       const accepted = new Set(response.accepted)
-      onDocumentsChange(documents.map((document) => accepted.has(document.id) ? { ...document, status: 'pending' } : document))
+      onDocumentsChange(documents.map((document) => accepted.has(document.id) ? { ...document, status: 'processing' } : document))
       setSyncNotice(t('project.syncSummary', {
         accepted: response.accepted.length,
         unchanged: response.skipped.unchanged.length,
@@ -686,6 +697,12 @@ export function ProjectPage({
     setSelectedTool(null)
     setAttachedDocumentIds([])
     setAttachmentPickerOpen(false)
+  }
+
+  function openDocumentReview(document: DocumentRow) {
+    setReviewDocumentId(document.id)
+    setAssistantOpen(false)
+    setSection('documents')
   }
 
   async function openChatSession(sessionId: string) {
@@ -768,6 +785,7 @@ export function ProjectPage({
         error: null,
         pending: true,
         feedback: null,
+        activity: [],
       },
     ]))
     try {
@@ -865,9 +883,35 @@ export function ProjectPage({
       },
     ]))
     try {
-      const result = await askKnowledgeBase(query, workspaceId, {
+      const result = await streamKnowledgeBase(query, workspaceId, {
         filePaths: attachmentsSnapshot.map((document) => document.sourcePath),
         chatSessionId: sessionIdSnapshot,
+      }, (event) => {
+        if (event.event === 'message_chunk' || event.event === 'final_response') {
+          setChatTurns((current) => current.map((turn) => {
+            if (turn.id !== turnId) return turn
+            const answer = turn.answer || { answer_id: `stream-${turnId}`, answer: '', citations: [] }
+            return {
+              ...turn,
+              answer: {
+                ...answer,
+                answer_id: event.answer_id || answer.answer_id,
+                answer: answer.answer + (event.event === 'message_chunk' ? event.content : ''),
+                citations: event.citations || answer.citations,
+                confidence: event.confidence || answer.confidence,
+                chatSession: event.chat_session || answer.chatSession,
+              },
+            }
+          }))
+          return
+        }
+        const activity = streamActivityFromEvent(event, turnId)
+        if (!activity) return
+        setChatTurns((current) => current.map((turn) => (
+          turn.id === turnId
+            ? { ...turn, activity: [...(turn.activity || []), activity] }
+            : turn
+        )))
       })
       if (
         currentWorkspaceIdRef.current !== workspaceId
@@ -1059,7 +1103,7 @@ export function ProjectPage({
   const sourceLabel = workspaceSettings?.retrieval.rerank_provider ? t('project.sourceReady') : t('project.usingWorkspaceData')
 
   return (
-    <section className="page page-project" aria-labelledby="project-title">
+    <section className="page page-project" data-assistant-open={assistantOpen ? 'true' : 'false'} aria-labelledby="project-title">
       <aside
         className="project-sidebar"
         data-rail-collapsed={railCollapsed ? 'true' : undefined}
@@ -1110,8 +1154,12 @@ export function ProjectPage({
         {syncNotice && <p className="workspace-notice" role="status">{syncNotice}</p>}
         {busy && <div className="workspace-loading"><span className="system-loader" /> {t('project.loading')}</div>}
 
-        {!busy && section === 'documents' && (
-          <DocumentTable sessionKey={projectSessionKey} documents={documents} selectedIds={selectedIds} onToggle={toggleDocument} onToggleMany={toggleDocuments} onToggleAll={toggleAllDocuments} onRename={(document) => void renameSelected(document)} onDelete={(document) => requestDelete([document.id])} onDownload={(document) => void downloadDocument(workspace.workspace_id, document)} onAnalyze={onAnalyze} />
+        {!busy && section === 'documents' && reviewDocument && (
+          <DocumentReviewWorkbench workspaceId={workspace.workspace_id} document={reviewDocument} onClose={() => setReviewDocumentId(null)} />
+        )}
+
+        {!busy && section === 'documents' && !reviewDocument && (
+          <DocumentTable documents={documents} selectedIds={selectedIds} onToggle={toggleDocument} onToggleMany={toggleDocuments} onToggleAll={toggleAllDocuments} onRename={(document) => void renameSelected(document)} onDelete={(document) => requestDelete([document.id])} onDownload={(document) => void downloadDocument(workspace.workspace_id, document)} onAnalyze={onAnalyze} onOpen={openDocumentReview} />
         )}
 
         {!busy && section === 'overview' && overview && (
@@ -1157,7 +1205,6 @@ export function ProjectPage({
           <KnowledgeGraphPanel
             graph={knowledgeGraph}
             loading={busy}
-            storageKey={projectSessionKey}
             onRefresh={() => void refreshKnowledgeGraph()}
             onDownload={() => void downloadWorkspaceGraphml(workspace.workspace_id).catch((reason) => setError(reason instanceof Error ? reason.message : 'Không thể tải GraphML'))}
           />
@@ -1180,7 +1227,10 @@ export function ProjectPage({
         )}
       </main>
 
-      <aside className="project-ai-panel">
+      <button type="button" className="project-ai-fab" aria-label={t('project.openAssistant')} title={t('project.openAssistant')} onClick={() => setAssistantOpen(true)}><Bot size={20} /><span>{chatTurns.length}</span></button>
+      {assistantOpen && <button type="button" className="project-ai-scrim" aria-label={t('common.close')} onClick={() => setAssistantOpen(false)} />}
+
+      <aside className="project-ai-panel" aria-hidden={!assistantOpen}>
         <header className="project-ai-header">
           <div className="project-ai-identity">
             <i><Bot size={19} /></i>
@@ -1193,6 +1243,7 @@ export function ProjectPage({
             </div>
           </div>
           <div className="project-ai-header-actions">
+            <button type="button" className="project-ai-header-button" aria-label={t('project.closeAssistant')} title={t('project.closeAssistant')} onClick={() => setAssistantOpen(false)}><X size={17} /></button>
             <button
               type="button"
               className={`project-ai-header-button${historyOpen ? ' is-active' : ''}`}
@@ -1263,6 +1314,7 @@ export function ProjectPage({
                 )}
               </div>
               {turn.pending && <div className="ai-thinking"><span className="system-loader" /> {t('project.analyzing')}</div>}
+              {(turn.pending || !!turn.activity?.length) && <CollapsibleReasoning activities={turn.activity || []} pending={turn.pending} />}
               {turn.error && <p className="ai-error" role="alert">{turn.error}</p>}
               {turn.toolExecution && turn.toolExecution.result_type !== 'answer' && <ToolResultRenderer execution={turn.toolExecution} onGetEvidence={(evidenceId) => { void readEvidence(evidenceId) }} />}
               {turn.answer && <article className="assistant-message"><AssistantAnswerText text={turn.answer.answer} /><CitationEvidenceList titleKey="project.sources" citations={turn.answer.citations} confidence={turn.answer.confidence} /><div className="answer-feedback" aria-label={t('project.feedbackPrompt')}><button type="button" aria-label={t('project.feedbackPositive')} title={t('project.feedbackPositive')} className={turn.feedback === 'positive' ? 'is-selected' : ''} disabled={turn.feedback !== null} onClick={() => { void sendFeedback(turn.id, turn.answer!.answer_id, 'positive') }}><ThumbsUp size={13} /></button><button type="button" aria-label={t('project.feedbackNegative')} title={t('project.feedbackNegative')} className={turn.feedback === 'negative' ? 'is-selected' : ''} disabled={turn.feedback !== null} onClick={() => { void sendFeedback(turn.id, turn.answer!.answer_id, 'negative') }}><ThumbsDown size={13} /></button></div></article>}

@@ -1,52 +1,83 @@
-"""LangGraph Multi-Agent Orchestrator StateGraph.
-
-Coordinates Query Formulation, Parallel Retrieval, Synthesis, and Critic Reflection loop.
-RULE 1: Shared State ONLY. Reads and writes to AgentState.
-"""
+"""Main-agent LangGraph with specialist handoffs and a shared tool executor."""
 
 from langgraph.graph import END, START, StateGraph
 
-from src.agents.nodes.critic_reflection import (
-    critic_reflection_node,
-    should_continue_reflection,
-)
+from src.agents.nodes.critic_reflection import critic_reflection_node
 from src.agents.nodes.parallel_retriever import parallel_retriever_node
 from src.agents.nodes.query_formulator import query_formulator_node
 from src.agents.nodes.synthesizer import synthesizer_node
+from src.agents.agent_runtime import (
+    execute_agent_tools,
+    route_after_agent,
+    route_after_tools,
+    run_agent_node,
+)
 from src.agents.orchestrator.state import AgentState
 from src.core.config import logger
 
 
 def build_agentic_rag_graph():
-    """Construct and compile the LangGraph multi-agent execution pipeline."""
-    logger.info("Assembling Agentic RAG StateGraph...")
+    """Build the supervisor/team workflow shown in the runtime flow UI.
+
+    Main chooses a specialist or a knowledge tool. Each specialist can call
+    its role-scoped tools through the shared ToolNode and return findings to
+    Main. A candidate answer cannot bypass Critic review.
+    """
+    logger.info("Assembling Main-agent Agentic RAG StateGraph...")
 
     workflow = StateGraph(AgentState)
 
-    # 1. Register Sub-Agent Nodes
+    # Main is the supervisor; specialists are collaborative workers.
+    workflow.add_node("agent_main", lambda state: run_agent_node("agent_main", state))
     workflow.add_node("query_formulator", query_formulator_node)
     workflow.add_node("parallel_retriever", parallel_retriever_node)
     workflow.add_node("synthesizer", synthesizer_node)
     workflow.add_node("critic_reflection", critic_reflection_node)
+    workflow.add_node("tools", execute_agent_tools)
 
-    # 2. Add Fixed Directed Edges
-    workflow.add_edge(START, "query_formulator")
-    workflow.add_edge("query_formulator", "parallel_retriever")
-    workflow.add_edge("parallel_retriever", "synthesizer")
-    workflow.add_edge("synthesizer", "critic_reflection")
+    workflow.add_edge(START, "agent_main")
 
-    # 3. Add Reflection Conditional Edge
+    # Every role either continues its own tool loop or returns control to
+    # Main. Main's conditional route may hand off to any specialist and is
+    # guarded by the mandatory Critic/best-candidate terminal rules.
+    main_routes = {
+        "tools": "tools",
+        "query_formulator": "query_formulator",
+        "parallel_retriever": "parallel_retriever",
+        "synthesizer": "synthesizer",
+        "critic_reflection": "critic_reflection",
+        "end": END,
+    }
     workflow.add_conditional_edges(
+        "agent_main",
+        lambda state: route_after_agent("agent_main", state),
+        main_routes,
+    )
+    for role in (
+        "query_formulator",
+        "parallel_retriever",
+        "synthesizer",
         "critic_reflection",
-        should_continue_reflection,
+    ):
+        workflow.add_conditional_edges(
+            role,
+            lambda state, current=role: route_after_agent(current, state),
+            {"tools": "tools", "agent_main": "agent_main"},
+        )
+    workflow.add_conditional_edges(
+        "tools",
+        route_after_tools,
         {
-            "reformulate": "query_formulator",
-            "end": END,
+            "agent_main": "agent_main",
+            "query_formulator": "query_formulator",
+            "parallel_retriever": "parallel_retriever",
+            "synthesizer": "synthesizer",
+            "critic_reflection": "critic_reflection",
         },
     )
 
     compiled_graph = workflow.compile()
-    logger.info("Agentic RAG StateGraph assembled and compiled successfully.")
+    logger.info("Main-agent Agentic RAG StateGraph assembled and compiled successfully.")
     return compiled_graph
 
 

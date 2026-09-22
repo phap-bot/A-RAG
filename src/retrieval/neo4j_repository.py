@@ -88,6 +88,8 @@ class Neo4jRepository:
     def ensure_schema(self) -> None:
         """Create idempotent constraints/indexes required by retrieval."""
         statements = [
+            "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.user_id IS UNIQUE",
+            "CREATE CONSTRAINT user_email_unique IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE",
             # Zone 1 IDs are deterministic from source content. Scope them by
             # workspace so identical bytes in two tenants never overwrite one
             # another's document, chunk, or provenance graph.
@@ -138,6 +140,101 @@ class Neo4jRepository:
         self.verify_connectivity()
         if settings.neo4j_auto_schema:
             self.ensure_schema()
+
+    # ------------------------------------------------------------------
+    # Authentication user storage
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _user_from_row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        node = row.get("user")
+        if node is None:
+            return None
+        return dict(node)
+
+    def create_user(self, user: Mapping[str, Any]) -> dict[str, Any]:
+        """Create one User node; the caller must provide only a password hash."""
+        query = """
+        CREATE (u:User {
+            user_id: $user_id,
+            email: $email,
+            display_name: $display_name,
+            password_hash: $password_hash,
+            role: $role,
+            is_active: $is_active,
+            created_at: $created_at,
+            updated_at: $updated_at,
+            password_updated_at: $password_updated_at
+        })
+        RETURN u AS user
+        """
+        rows = self._read(query, **dict(user))
+        created = self._user_from_row(rows[0] if rows else None)
+        if created is None:
+            raise GraphDBError(
+                "Neo4j user creation returned no record",
+                details={"email": user.get("email")},
+            )
+        return created
+
+    def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        rows = self._read(
+            "MATCH (u:User {email: $email}) RETURN u AS user LIMIT 1",
+            email=email,
+        )
+        return self._user_from_row(rows[0] if rows else None)
+
+    def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        rows = self._read(
+            "MATCH (u:User {user_id: $user_id}) RETURN u AS user LIMIT 1",
+            user_id=user_id,
+        )
+        return self._user_from_row(rows[0] if rows else None)
+
+    def list_users(self) -> list[dict[str, Any]]:
+        rows = self._read(
+            "MATCH (u:User) RETURN u AS user ORDER BY u.created_at ASC",
+        )
+        return [user for row in rows if (user := self._user_from_row(row)) is not None]
+
+    def update_user(
+        self,
+        user_id: str,
+        *,
+        role: str | None = None,
+        is_active: bool | None = None,
+        password_hash: str | None = None,
+        updated_at: float | None = None,
+        password_updated_at: float | None = None,
+    ) -> dict[str, Any] | None:
+        assignments: list[str] = []
+        parameters: dict[str, Any] = {"user_id": user_id}
+        if role is not None:
+            assignments.append("u.role = $role")
+            parameters["role"] = role
+        if is_active is not None:
+            assignments.append("u.is_active = $is_active")
+            parameters["is_active"] = is_active
+        if password_hash is not None:
+            assignments.extend([
+                "u.password_hash = $password_hash",
+                "u.password_updated_at = $password_updated_at",
+            ])
+            parameters["password_hash"] = password_hash
+            parameters["password_updated_at"] = password_updated_at or 0.0
+        if updated_at is not None:
+            assignments.append("u.updated_at = $updated_at")
+            parameters["updated_at"] = updated_at
+        if not assignments:
+            return self.get_user_by_id(user_id)
+        query = f"""
+        MATCH (u:User {{user_id: $user_id}})
+        SET {', '.join(assignments)}
+        RETURN u AS user
+        """
+        rows = self._read(query, **parameters)
+        return self._user_from_row(rows[0] if rows else None)
 
     def upsert_document(
         self,
@@ -659,6 +756,7 @@ class Neo4jRepository:
         entity_query: str,
         max_hops: int = 2,
         limit: int | None = None,
+        file_paths: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Expand relationships around chunks matching a graph/entity query."""
         bounded_hops = max(1, min(int(max_hops), 5))
@@ -668,6 +766,7 @@ class Neo4jRepository:
             CALL db.index.fulltext.queryNodes($index_name, $entity_query, {{limit: $candidate_limit}})
             YIELD node, score
             WHERE node.workspace_id = $workspace_id
+              AND (size($file_paths) = 0 OR node.source_path IN $file_paths)
             MATCH path = (node)-[*1..{bounded_hops}]-(target)
             WHERE target.workspace_id = $workspace_id
             WITH node, target, relationships(path) AS rels, score
@@ -684,6 +783,7 @@ class Neo4jRepository:
             candidate_limit=bounded_limit * settings.neo4j_vector_oversampling,
             workspace_id=workspace_id,
             bounded_limit=bounded_limit,
+            file_paths=list(file_paths or []),
         )
         return [
             {

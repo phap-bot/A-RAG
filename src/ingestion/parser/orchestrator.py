@@ -1,10 +1,14 @@
-"""LLM-driven Zone 1 ingestion orchestration.
+"""Standalone LLM-driven parser-agent orchestration.
 
 The orchestrator is intentionally small: the runtime skill describes the
 format policy, the LLM selects a single parser tool, and LangGraph's
 ``ToolNode`` executes the deterministic parser implementation. The LLM then
 reviews the tool result and either calls an enrichment/correction tool or
 returns the final validated JSON document.
+
+The Web upload path does not invoke this graph. It invokes
+``src.ingestion.pipeline.graph.ingestion_pipeline_graph`` so production has
+one ingestion executor and one observable lifecycle.
 """
 
 from __future__ import annotations
@@ -477,6 +481,7 @@ def run_ingestion(
     file_path: str | None = None,
     output_path: str | None = None,
     llm: BaseChatModel | None = None,
+    allow_configured_llm: bool = False,
 ) -> AgentState:
     """Run the LLM-driven ingestion loop and return its final state.
 
@@ -485,9 +490,23 @@ def run_ingestion(
         file_path: Optional local file path for file-based ingestion.
         output_path: Optional destination ending in ``.json``.
         llm: Optional injected chat model for tests or a local provider.
+        allow_configured_llm: Opt in to using ``OPENAI_API_KEY`` when ``llm``
+            is omitted. The default keeps this helper deterministic and makes
+            accidental network calls impossible in local/test runs.
     """
     initial_state = create_initial_state(raw_content=raw_content, file_path=file_path)
     initial_state["output_path"] = output_path
+    if llm is None and not allow_configured_llm:
+        return cast(
+            AgentState,
+            _error_update(
+                initial_state,
+                ConfigurationError(
+                    "An LLM must be injected for tests/local offline runs or "
+                    "allow_configured_llm=True must be set for production ingestion"
+                ),
+            ),
+        )
     graph = build_ingestion_graph(llm=llm) if llm is not None else ingestion_graph
     result = graph.invoke(initial_state)
     logger.info(f"Ingestion graph completed at stage={result.get('stage')}")

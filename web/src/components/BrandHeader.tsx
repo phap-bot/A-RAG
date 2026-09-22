@@ -1,4 +1,4 @@
-import { Bell, Check, ChevronDown, Globe2, LogOut, Menu, UserRoundCog } from 'lucide-react'
+import { Bell, Check, ChevronDown, GitBranch, Globe2, LogOut, Menu, UserRoundCog } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -54,6 +54,7 @@ export function BrandHeader({
     .join('')
   const workspaceNavigationActive = view === 'workspaces' || view === 'project'
   const assistantNavigationActive = view === 'assistant'
+  const agentFlowNavigationActive = view === 'agent-flow'
 
   useEffect(() => {
     if (!languageOpen) return
@@ -132,6 +133,7 @@ export function BrandHeader({
                 <Button variant="ghost" className={view === 'admin' ? 'is-active' : ''} onClick={() => onNavigate('admin')} leadingIcon={<UserRoundCog size={15} />}>{t('nav.userAccess')}</Button>
               )}
               <Button variant="ghost" className={assistantNavigationActive ? 'is-active' : ''} disabled={!hasWorkspace} onClick={() => onNavigate('assistant')}>{t('nav.intelligence')}</Button>
+              <Button variant="ghost" className={agentFlowNavigationActive ? 'is-active' : ''} disabled={!hasWorkspace} onClick={() => onNavigate('agent-flow')} leadingIcon={<GitBranch size={15} />}>Agent Flow</Button>
             </nav>
           </>
         )}
@@ -148,6 +150,7 @@ export function BrandHeader({
                   <Button variant="ghost" className={workspaceNavigationActive ? 'is-active' : ''} onClick={() => navigateFromMobile('workspaces')}>{t('nav.workspaces')}</Button>
                   {globalRole === 'admin' && <Button variant="ghost" className={view === 'admin' ? 'is-active' : ''} onClick={() => navigateFromMobile('admin')}>{t('nav.userAccess')}</Button>}
                   <Button variant="ghost" className={assistantNavigationActive ? 'is-active' : ''} disabled={!hasWorkspace} onClick={() => navigateFromMobile('assistant')}>{t('nav.intelligence')}</Button>
+                  <Button variant="ghost" className={agentFlowNavigationActive ? 'is-active' : ''} disabled={!hasWorkspace} onClick={() => navigateFromMobile('agent-flow')} leadingIcon={<GitBranch size={15} />}>Agent Flow</Button>
                   <Button variant="ghost" className="mobile-nav-signout" onClick={onSignOut}>{t('common.signOut')}</Button>
                 </nav>
               )}

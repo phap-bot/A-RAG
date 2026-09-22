@@ -4,12 +4,14 @@ RULE 1: Shared State ONLY. Agents must ONLY read from and write to AgentState.
 RULE 5: Strict Typing with PEP 484 and Pydantic v2 validation.
 """
 
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Literal, Optional, TypedDict
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 
 ModalityType = Literal["text", "table", "image", "chart", "code"]
-SourceType = Literal["vector_dense", "bm25", "neo4j_graph", "hybrid"]
+SourceType = Literal["vector_dense", "bm25", "neo4j_graph", "hybrid", "local_lexical"]
 
 
 class RetrievedChunk(BaseModel):
@@ -95,6 +97,28 @@ class AgentState(TypedDict):
     retrieval_trace: Dict[str, Any]
     provenance_validation: Dict[str, Any]
     errors: List[str]
+    # Agent conversations are isolated by role so one agent's tool transcript
+    # does not silently become another agent's prompt context. ToolNode is
+    # configured with the active role's message key.
+    agent_main_messages: Annotated[List[AnyMessage], add_messages]
+    query_formulator_messages: Annotated[List[AnyMessage], add_messages]
+    parallel_retriever_messages: Annotated[List[AnyMessage], add_messages]
+    synthesizer_messages: Annotated[List[AnyMessage], add_messages]
+    critic_reflection_messages: Annotated[List[AnyMessage], add_messages]
+    active_agent: str
+    handoff_reason: str
+    agent_handoffs: int
+    agent_tool_rounds: Dict[str, int]
+    max_agent_handoffs: int
+    max_tool_rounds: int
+    formulation_count: int
+    retrieval_complete: bool
+    candidate_version: int
+    critique_version: int
+    best_candidate: Dict[str, Any]
+    attempt_history: List[Dict[str, Any]]
+    run_status: str
+    main_summary: str
 
 
 def create_initial_agent_state(
@@ -103,6 +127,8 @@ def create_initial_agent_state(
     max_retries: int = 3,
     workspace_id: str = "",
     file_paths: Optional[List[str]] = None,
+    max_agent_handoffs: int = 12,
+    max_tool_rounds: int = 6,
 ) -> AgentState:
     """Helper to initialize a clean AgentState container."""
     return AgentState(
@@ -121,6 +147,25 @@ def create_initial_agent_state(
         retrieval_trace={},
         provenance_validation={},
         errors=[],
+        agent_main_messages=[],
+        query_formulator_messages=[],
+        parallel_retriever_messages=[],
+        synthesizer_messages=[],
+        critic_reflection_messages=[],
+        active_agent="agent_main",
+        handoff_reason="",
+        agent_handoffs=0,
+        agent_tool_rounds={},
+        max_agent_handoffs=max_agent_handoffs,
+        max_tool_rounds=max_tool_rounds,
+        formulation_count=0,
+        retrieval_complete=False,
+        candidate_version=0,
+        critique_version=0,
+        best_candidate={},
+        attempt_history=[],
+        run_status="running",
+        main_summary="",
     )
 
 

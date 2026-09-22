@@ -198,7 +198,11 @@ class VLMCaptioningSkill:
             return response.content, "live_vlm"
         except Exception as exc:
             logger.warning(f"Live VLM captioning failed: {exc}. Falling back to deterministic caption.")
-            return self._fallback_caption(element), "vlm_fallback_error"
+            # The output is the same deterministic caption used when no live
+            # provider is configured. Keep one stable provenance tag so
+            # downstream metadata and tests do not depend on whether the
+            # optional provider package happened to be installed.
+            return self._fallback_caption(element), "deterministic_fallback"
 
     @staticmethod
     def _fallback_caption(element: ParsedElement) -> str:

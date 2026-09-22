@@ -3,12 +3,10 @@ import { Database, Download, GitBranch, RefreshCw, RotateCcw, Share2, ZoomIn, Zo
 
 import { Button } from './ui/Button'
 import type { KnowledgeGraph } from '../types'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 
 type KnowledgeGraphPanelProps = {
   graph: KnowledgeGraph | null
   loading: boolean
-  storageKey: string
   onRefresh: () => void
   onDownload: () => void
 }
@@ -26,12 +24,6 @@ type PanGesture = {
 
 const GRAPH_WIDTH = 820
 const GRAPH_HEIGHT = 430
-
-type GraphSessionState = {
-  zoom: number
-  pan: PanPosition
-  selectedNodeId: string | null
-}
 
 function displayLabel(value: string, maxLength = 25): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value
@@ -63,7 +55,6 @@ function attributeText(attributes: Record<string, unknown>, key: string): string
 export function KnowledgeGraphPanel({
   graph,
   loading,
-  storageKey,
   onRefresh,
   onDownload,
 }: KnowledgeGraphPanelProps) {
@@ -74,8 +65,6 @@ export function KnowledgeGraphPanel({
   const panGesture = useRef<PanGesture | null>(null)
   const didPan = useRef(false)
   const canvasRef = useRef<SVGSVGElement | null>(null)
-  const viewportHydratedRef = useRef(false)
-  const graphSessionKey = sessionStorageKey('graph', storageKey)
   const positions = useMemo(() => graphPositions(graph), [graph])
   const visibleEdges = (graph?.edges || []).filter((edge) => positions.has(edge.source) && positions.has(edge.target))
   const hasGraph = Boolean(graph && graph.node_count > 0)
@@ -90,27 +79,10 @@ export function KnowledgeGraphPanel({
   })
 
   useEffect(() => {
-    if (!graph) {
-      viewportHydratedRef.current = false
-      return
-    }
-    const saved = readSessionState<GraphSessionState>(graphSessionKey)
-    const selectedId = saved?.selectedNodeId && graph.nodes.some((node) => node.id === saved.selectedNodeId)
-      ? saved.selectedNodeId
-      : null
-    const nextZoom = typeof saved?.zoom === 'number' && Number.isFinite(saved.zoom)
-      ? Math.min(2.4, Math.max(.55, saved.zoom))
-      : 1
-    setZoom(nextZoom)
-    setPan(saved?.pan && Number.isFinite(saved.pan.x) && Number.isFinite(saved.pan.y) ? saved.pan : { x: 0, y: 0 })
-    setSelectedNodeId(selectedId)
-    viewportHydratedRef.current = true
-  }, [graph?.edge_count, graph?.node_count, graph?.workspace_id, graphSessionKey])
-
-  useEffect(() => {
-    if (!graph || !viewportHydratedRef.current) return
-    writeSessionState<GraphSessionState>(graphSessionKey, { zoom, pan, selectedNodeId })
-  }, [graph, graphSessionKey, pan, selectedNodeId, zoom])
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
+    setSelectedNodeId(null)
+  }, [graph?.edge_count, graph?.node_count, graph?.workspace_id])
 
   useEffect(() => {
     const canvas = canvasRef.current

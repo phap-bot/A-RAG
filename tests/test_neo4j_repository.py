@@ -139,6 +139,7 @@ def test_schema_and_upsert_scope_ids_by_workspace() -> None:
     schema_calls = [query for query, _ in driver.session_instance.transaction.calls]
     assert any("(c.workspace_id, c.chunk_id)" in query for query in schema_calls)
     assert any("(d.workspace_id, d.document_id)" in query for query in schema_calls)
+    assert any(":User" in query and "u.email" in query for query in schema_calls)
 
     document, chunks = _document()
     result = repository.upsert_document(

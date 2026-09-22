@@ -14,13 +14,13 @@ import {
   ThumbsUp,
 } from 'lucide-react'
 
-import { askKnowledgeBase, downloadDocument, executeAssistantTool, getAssistantToolCatalog, getChatSession, getChatSessions, getDocumentMetadata, getDocumentPreview, submitAnswerFeedback } from '../api'
+import { downloadDocument, executeAssistantTool, getAssistantToolCatalog, getChatSession, getChatSessions, getDocumentMetadata, getDocumentPreview, streamKnowledgeBase, submitAnswerFeedback } from '../api'
 import { CitationEvidenceList } from '../components/CitationEvidenceList'
+import { CollapsibleReasoning } from '../components/CollapsibleReasoning'
 import { AssistantToolComposer } from '../components/assistant/AssistantToolComposer'
 import { ToolResultRenderer } from '../components/assistant/ToolResultRenderer'
 import { Button } from '../components/ui/Button'
-import type { AssistantToolDefinition, AssistantToolExecution, AssistantToolName, DocumentMetadata, DocumentPreview, DocumentRow, QueryResponse, UiBootstrap, WorkspaceRecord } from '../types'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
+import type { AgentStreamActivity, AgentStreamEvent, AssistantToolDefinition, AssistantToolExecution, AssistantToolName, DocumentMetadata, DocumentPreview, DocumentRow, QueryResponse, UiBootstrap, WorkspaceRecord } from '../types'
 
 type ChatTurn = {
   id: string
@@ -30,6 +30,20 @@ type ChatTurn = {
   error: string | null
   pending: boolean
   feedback: 'positive' | 'negative' | null
+  activity?: AgentStreamActivity[]
+}
+
+function streamActivityFromEvent(event: AgentStreamEvent, turnId: string): AgentStreamActivity | null {
+  if (event.event === 'agent_thought') {
+    return { id: `${turnId}-${event.run_id || event.node}`, kind: 'thought', label: event.message, details: event.details }
+  }
+  if (event.event === 'tool_start') {
+    return { id: `${turnId}-${event.run_id || event.tool_name}-start`, kind: 'tool', label: `${event.tool_name} started` }
+  }
+  if (event.event === 'tool_result') {
+    return { id: `${turnId}-${event.run_id || event.tool_name}-result`, kind: 'tool', label: `${event.tool_name} completed` }
+  }
+  return null
 }
 
 type AssistantPageProps = {
@@ -40,14 +54,6 @@ type AssistantPageProps = {
   onDocumentChange?: (document: DocumentRow | null) => void
   onClose: () => void
   onBack: () => void
-}
-
-type AssistantSessionState = {
-  documentId: string | null
-  question: string
-  activeChatSessionId: string | null
-  selectedToolName: string | null
-  feedbackByAnswerId: Record<string, 'positive' | 'negative'>
 }
 
 export function AssistantPage({
@@ -77,43 +83,33 @@ export function AssistantPage({
   const conversationEndRef = useRef<HTMLDivElement>(null)
   const currentWorkspaceIdRef = useRef(workspace.workspace_id)
   const workspaceRequestEpochRef = useRef(0)
-  const sessionHydrationPendingRef = useRef(false)
-  const assistantSessionKey = sessionStorageKey('assistant', `${bootstrap.session.email || bootstrap.session.display_name}:${workspace.workspace_id}`)
   if (currentWorkspaceIdRef.current !== workspace.workspace_id) {
     currentWorkspaceIdRef.current = workspace.workspace_id
     workspaceRequestEpochRef.current += 1
   }
 
   useEffect(() => {
-    const saved = readSessionState<AssistantSessionState>(assistantSessionKey)
-    const selected = initialDocument || documents.find((item) => item.id === saved?.documentId) || documents[0] || null
-    sessionHydrationPendingRef.current = true
+    const selected = initialDocument || documents[0] || null
     setDocument(selected)
     setChatTurns([])
-    setQuestion(saved?.question || '')
+    setQuestion('')
     setSelectedTool(null)
     setError(null)
-    setActiveChatSessionId(saved?.activeChatSessionId || null)
-    setFeedbackByAnswerId(saved?.feedbackByAnswerId || {})
+    setActiveChatSessionId(null)
+    setFeedbackByAnswerId({})
     setAsking(false)
     getAssistantToolCatalog(workspace.workspace_id)
       .then((catalog) => {
         setAssistantTools(catalog.composer_tools)
-        const restoredTool = saved?.selectedToolName
-          ? catalog.composer_tools.find((tool) => tool.name === saved.selectedToolName) || null
-          : null
-        setSelectedTool(restoredTool)
-        sessionHydrationPendingRef.current = false
       })
       .catch(() => {
         setAssistantTools([])
-        sessionHydrationPendingRef.current = false
       })
     let cancelled = false
     getChatSessions(workspace.workspace_id)
       .then(async (sessions) => {
         if (cancelled) return
-        const sessionId = saved?.activeChatSessionId || sessions[0]?.id
+        const sessionId = sessions[0]?.id
         if (!sessionId) return
         const session = await getChatSession(workspace.workspace_id, sessionId)
         if (cancelled) return
@@ -128,28 +124,15 @@ export function AssistantPage({
             confidence: turn.confidence,
             chatSession: session,
           },
-          toolExecution: null,
-          error: null,
-          pending: false,
-            feedback: turn.answer_id ? (saved?.feedbackByAnswerId || {})[turn.answer_id] || null : null,
+            toolExecution: null,
+            error: null,
+            pending: false,
+            feedback: null,
         })))
       })
       .catch(() => undefined)
     return () => { cancelled = true }
-  }, [assistantSessionKey, initialDocument?.id, workspace.workspace_id])
-
-  useEffect(() => {
-    if (sessionHydrationPendingRef.current) {
-      return
-    }
-    writeSessionState<AssistantSessionState>(assistantSessionKey, {
-      documentId: document?.id || null,
-      question,
-      activeChatSessionId,
-      selectedToolName: selectedTool?.name || null,
-      feedbackByAnswerId,
-    })
-  }, [activeChatSessionId, assistantSessionKey, document?.id, feedbackByAnswerId, question, selectedTool?.name])
+  }, [initialDocument?.id, workspace.workspace_id])
 
   useEffect(() => {
     onDocumentChange?.(document)
@@ -305,9 +288,35 @@ export function AssistantPage({
       { id: turnId, question: rawQuestion, answer: null, toolExecution: null, error: null, pending: true, feedback: null },
     ]))
     try {
-      const result = await askKnowledgeBase(rawQuestion, workspaceId, {
+      const result = await streamKnowledgeBase(rawQuestion, workspaceId, {
         filePaths: document ? [document.sourcePath] : [],
         chatSessionId: sessionIdSnapshot,
+      }, (event) => {
+        if (event.event === 'message_chunk' || event.event === 'final_response') {
+          setChatTurns((current) => current.map((turn) => {
+            if (turn.id !== turnId) return turn
+            const answer = turn.answer || { answer_id: `stream-${turnId}`, answer: '', citations: [] }
+            return {
+              ...turn,
+              answer: {
+                ...answer,
+                answer_id: event.answer_id || answer.answer_id,
+                answer: answer.answer + (event.event === 'message_chunk' ? event.content : ''),
+                citations: event.citations || answer.citations,
+                confidence: event.confidence || answer.confidence,
+                chatSession: event.chat_session || answer.chatSession,
+              },
+            }
+          }))
+          return
+        }
+        const activity = streamActivityFromEvent(event, turnId)
+        if (!activity) return
+        setChatTurns((current) => current.map((turn) => (
+          turn.id === turnId
+            ? { ...turn, activity: [...(turn.activity || []), activity] }
+            : turn
+        )))
       })
       if (
         currentWorkspaceIdRef.current !== workspaceId
@@ -400,6 +409,7 @@ export function AssistantPage({
                       <div className="user-message">{turn.question}</div>
                     </div>
                     {turn.pending && <div className="ai-thinking"><span className="system-loader" /> {t('assistant.thinking')}</div>}
+                    {(turn.pending || !!turn.activity?.length) && <CollapsibleReasoning activities={turn.activity || []} pending={turn.pending} />}
                     {turn.error && <p className="ai-error" role="alert">{turn.error}</p>}
                     {turn.toolExecution && turn.toolExecution.result_type !== 'answer' && <ToolResultRenderer execution={turn.toolExecution} onGetEvidence={(evidenceId) => { void readEvidence(evidenceId) }} />}
                     {turn.answer && <article className="analysis-answer"><span>{t('assistant.responseLabel')}</span><p>{turn.answer.answer}</p><CitationEvidenceList titleKey="assistant.references" citations={turn.answer.citations} confidence={turn.answer.confidence} /><div className="answer-feedback" aria-label="Answer feedback"><span>Helpful?</span><button type="button" className={turn.feedback === 'positive' ? 'is-selected' : ''} disabled={turn.feedback !== null} onClick={() => { void sendFeedback(turn.id, turn.answer!.answer_id, 'positive') }}><ThumbsUp size={13} /></button><button type="button" className={turn.feedback === 'negative' ? 'is-selected' : ''} disabled={turn.feedback !== null} onClick={() => { void sendFeedback(turn.id, turn.answer!.answer_id, 'negative') }}><ThumbsDown size={13} /></button></div></article>}

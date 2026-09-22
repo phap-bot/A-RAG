@@ -25,7 +25,6 @@ import {
   updateEvaluationDisplayMetrics,
 } from '../api'
 import { Button } from '../components/ui/Button'
-import { readSessionState, removeSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 import {
   EVALUATION_METRICS,
   EvaluationJobSummary,
@@ -38,12 +37,6 @@ import {
 type EvaluationPageProps = {
   bootstrap: UiBootstrap
   workspace: WorkspaceRecord
-}
-
-type EvaluationSessionState = {
-  jobId: string
-  expandedRow: string | null
-  displayMetrics: EvaluationMetric[]
 }
 
 const metricLabels: Record<EvaluationMetric, string> = {
@@ -228,7 +221,6 @@ export function EvaluationPage({ bootstrap, workspace }: EvaluationPageProps) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const locale = bootstrap.locale || 'vi'
-  const evaluationSessionKey = sessionStorageKey('evaluation', `${bootstrap.session.email || bootstrap.session.display_name}:${workspace.workspace_id}`)
 
   const groundedRows = useMemo(
     () => rows.filter((row) => Boolean(row.reference_answer)),
@@ -252,52 +244,12 @@ export function EvaluationPage({ bootstrap, workspace }: EvaluationPageProps) {
   const needsRescore = Boolean(job && !manualReview && !isRunning && rowsNeedingRescore.length)
 
   useEffect(() => {
-    let cancelled = false
-    const saved = readSessionState<EvaluationSessionState>(evaluationSessionKey)
     setJob(null)
     setRows([])
-    setExpandedRow(saved?.expandedRow || null)
-    if (saved?.displayMetrics?.length) {
-      setDisplayMetrics(saved.displayMetrics)
-      setMetricDraft(saved.displayMetrics)
-    } else {
-      setDisplayMetrics([...EVALUATION_METRICS])
-      setMetricDraft([...EVALUATION_METRICS])
-    }
-    if (!saved?.jobId) return () => { cancelled = true }
-
-    Promise.all([
-      getEvaluationJob(workspace.workspace_id, saved.jobId),
-      getEvaluationRows(workspace.workspace_id, saved.jobId, 0, 200),
-    ]).then(([nextJob, result]) => {
-      if (cancelled) return
-      setJob(nextJob)
-      setRows(result.rows)
-      const nextMetrics = result.display_metrics.length
-        ? result.display_metrics
-        : nextJob.display_metrics
-      if (nextMetrics.length) {
-        setDisplayMetrics(nextMetrics)
-        setMetricDraft(nextMetrics)
-      }
-    }).catch(() => {
-      if (cancelled) return
-      removeSessionState(evaluationSessionKey)
-      setJob(null)
-      setRows([])
-      setError('Không thể khôi phục phiên evaluation trước đó.')
-    })
-    return () => { cancelled = true }
-  }, [evaluationSessionKey, workspace.workspace_id])
-
-  useEffect(() => {
-    if (!job) return
-    writeSessionState<EvaluationSessionState>(evaluationSessionKey, {
-      jobId: job.job_id,
-      expandedRow,
-      displayMetrics,
-    })
-  }, [displayMetrics, evaluationSessionKey, expandedRow, job])
+    setExpandedRow(null)
+    setDisplayMetrics([...EVALUATION_METRICS])
+    setMetricDraft([...EVALUATION_METRICS])
+  }, [workspace.workspace_id])
 
   useEffect(() => {
     const jobId = job?.job_id
@@ -352,11 +304,6 @@ export function EvaluationPage({ bootstrap, workspace }: EvaluationPageProps) {
     setExpandedRow(null)
     try {
       const created = await createEvaluationJob(workspace.workspace_id, file, locale)
-      writeSessionState<EvaluationSessionState>(evaluationSessionKey, {
-        jobId: created.job_id,
-        expandedRow: null,
-        displayMetrics: created.display_metrics.length ? created.display_metrics : [...EVALUATION_METRICS],
-      })
       setJob(created)
       const initialRows = await getEvaluationRows(workspace.workspace_id, created.job_id, 0, 200)
       setRows(initialRows.rows)

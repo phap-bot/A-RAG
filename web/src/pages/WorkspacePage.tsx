@@ -16,7 +16,6 @@ import {
 
 import { Button } from '../components/ui/Button'
 import type { UiBootstrap, WorkspaceRecord } from '../types'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 
 type WorkspacePageProps = {
   bootstrap: UiBootstrap
@@ -30,12 +29,6 @@ type WorkspacePageProps = {
 
 const localeMap: Record<string, string> = { en: 'en-US', ja: 'ja-JP', vi: 'vi-VN' }
 
-type WorkspaceSessionState = {
-  query: string
-  createOpen: boolean
-  createName: string
-}
-
 export function WorkspacePage({
   bootstrap,
   workspaces,
@@ -46,14 +39,12 @@ export function WorkspacePage({
   onOpenAssistant,
 }: WorkspacePageProps) {
   const { t, i18n } = useTranslation()
-  const sessionKey = sessionStorageKey('workspaces', bootstrap.session.email || bootstrap.session.display_name)
-  const savedSession = readSessionState<WorkspaceSessionState>(sessionKey)
-  const [query, setQuery] = useState(savedSession?.query || '')
+  const [query, setQuery] = useState('')
   const [searching, setSearching] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [createOpen, setCreateOpen] = useState(Boolean(savedSession?.createOpen))
-  const [createName, setCreateName] = useState(savedSession?.createName || '')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createName, setCreateName] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<WorkspaceRecord | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -68,10 +59,6 @@ export function WorkspacePage({
       `${item.name} ${item.workspace_id}`.toLocaleLowerCase(locale).includes(normalizedQuery)
     ))
     : workspaces
-
-  useEffect(() => {
-    writeSessionState<WorkspaceSessionState>(sessionKey, { query, createOpen, createName })
-  }, [createName, createOpen, query, sessionKey])
 
   useEffect(() => {
     if (!createOpen) return

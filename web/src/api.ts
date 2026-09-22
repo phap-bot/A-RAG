@@ -12,6 +12,7 @@ import type {
   Citation,
   DocumentApiRecord,
   DocumentPreview,
+  DocumentReview,
   DocumentMetadata,
   DocumentRow,
   IssuedMcpCredential,
@@ -20,6 +21,7 @@ import type {
   QueryResponse,
   AnswerFeedbackRating,
   IngestionStatus,
+  IngestionFlowEventsResponse,
   UiBootstrap,
   WorkspaceMember,
   WorkspaceOverview,
@@ -33,6 +35,7 @@ import type {
   AssistantToolCatalog,
   AssistantToolExecution,
   AssistantToolName,
+  AgentStreamEvent,
 } from './types'
 
 const configuredApiUrl = import.meta.env.VITE_API_BASE_URL?.trim()
@@ -78,14 +81,17 @@ export const API_ROUTES = {
   document: (documentId: string) => `/v1/documents/${encodeURIComponent(documentId)}`,
   documentContent: (documentId: string) => `/v1/documents/${encodeURIComponent(documentId)}/content`,
   documentPreview: (documentId: string) => `/v1/documents/${encodeURIComponent(documentId)}/preview`,
+  documentReview: (documentId: string) => `/v1/documents/${encodeURIComponent(documentId)}/review`,
   documentMetadata: (workspaceId: string, documentId: string) => `/v1/workspaces/${encodeURIComponent(workspaceId)}/documents/${encodeURIComponent(documentId)}/metadata`,
   syncDocuments: '/v1/documents/actions/sync-up',
   moveDocuments: '/v1/documents/actions/move',
   deleteDocuments: '/v1/documents/actions/delete',
   query: '/v1/query',
+  chatStream: '/api/chat/stream',
   assistantTools: (workspaceId: string) => `/v1/workspaces/${encodeURIComponent(workspaceId)}/assistant/tools`,
   assistantToolExecutions: (workspaceId: string) => `/v1/workspaces/${encodeURIComponent(workspaceId)}/assistant/tool-executions`,
   ingestionStatus: '/v1/ingestion/status',
+  ingestionEvents: (jobId: string, workspaceId: string, after: number) => `/v1/ingestion/jobs/${encodeURIComponent(jobId)}/events?workspace_id=${encodeURIComponent(workspaceId)}&after=${after}`,
   answerFeedback: '/v1/answers/feedback',
   evaluations: (workspaceId: string) => `/v1/workspaces/${encodeURIComponent(workspaceId)}/evaluations`,
   evaluationTemplate: (workspaceId: string) => `/v1/workspaces/${encodeURIComponent(workspaceId)}/evaluation-template`,
@@ -180,6 +186,7 @@ function toDocumentRow(record: DocumentApiRecord): DocumentRow {
     workspace: record.workspace,
     page: record.page,
     status: record.status,
+    jobId: record.job_id || null,
     uploadedAt: record.uploaded_at,
     sourcePath: record.source_path,
     sizeBytes: record.size_bytes,
@@ -348,9 +355,11 @@ export function deleteWorkspace(
 export type IngestionJobSummary = {
   job_id: string
   project_id: string
+  document_id: string
   status: string
   started_at: string | null
   finished_at: string | null
+  error?: Record<string, unknown> | null
 }
 
 export function getIngestionJob(jobId: string): Promise<IngestionJobSummary> {
@@ -488,6 +497,7 @@ export type SyncDocumentsResponse = {
   jobs: Array<{
     job_id: string
     status: string
+    document_id: string
     status_url: string
     files_url: string
   }>
@@ -595,6 +605,93 @@ export async function askKnowledgeBase(
   }
 }
 
+export function getDocumentReview(workspaceId: string, documentId: string): Promise<DocumentReview> {
+  const query = new URLSearchParams({ workspace_id: workspaceId })
+  return signedRequest<DocumentReview>(`${API_ROUTES.documentReview(documentId)}?${query}`)
+}
+
+export async function fetchDocumentContent(workspaceId: string, documentId: string): Promise<Blob> {
+  const query = new URLSearchParams({ workspace_id: workspaceId })
+  return await (await signedFetch(`${API_ROUTES.documentContent(documentId)}?${query}`)).blob()
+}
+
+export async function streamKnowledgeBase(
+  question: string,
+  workspaceId: string,
+  options: QueryOptions = {},
+  onEvent: (event: AgentStreamEvent) => void = () => undefined,
+): Promise<QueryResponse> {
+  const response = await signedFetch(API_ROUTES.chatStream, {
+    method: 'POST',
+    headers: {
+      'Accept': 'text/event-stream',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workspace_id: workspaceId,
+      question,
+      file_paths: options.filePaths || [],
+      conversation_history: options.conversationHistory || [],
+      chat_session_id: options.chatSessionId || null,
+      save_history: options.saveHistory ?? true,
+    }),
+  })
+  if (!response.body) throw new Error('Backend không trả về luồng SSE')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let streamErrorMessage: string | null = null
+  let result: QueryResponse = {
+    answer_id: `stream-${Date.now()}`,
+    answer: '',
+    citations: [],
+  }
+
+  const consumeFrame = (frame: string) => {
+    const data = frame
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter(Boolean)
+    for (const rawPayload of data) {
+      const event = JSON.parse(rawPayload) as AgentStreamEvent
+      onEvent(event)
+      if (event.event === 'error') {
+        streamErrorMessage = event.message
+        continue
+      }
+      if (event.event !== 'message_chunk' && event.event !== 'final_response') continue
+      result = {
+        answer_id: event.answer_id || result.answer_id,
+        answer: result.answer + (event.event === 'message_chunk' ? event.content : ''),
+        citations: event.citations || result.citations,
+        confidence: event.confidence || result.confidence,
+        chatSession: event.chat_session || result.chatSession,
+      }
+    }
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const frames = buffer.split(/\r?\n\r?\n/)
+      buffer = frames.pop() || ''
+      frames.forEach(consumeFrame)
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) consumeFrame(buffer)
+  } finally {
+    reader.releaseLock()
+  }
+
+  if (streamErrorMessage) throw new Error(streamErrorMessage)
+  if (!result.answer) result.answer = 'Backend chưa trả về nội dung câu trả lời.'
+  return result
+}
+
 export type AssistantToolExecutionPayload = {
   force_tool: AssistantToolName
   message?: string | null
@@ -634,6 +731,14 @@ export function getIngestionStatus(
   if (target.documentId) query.set('document_id', target.documentId)
   if (target.jobId) query.set('job_id', target.jobId)
   return signedRequest<IngestionStatus>(`${API_ROUTES.ingestionStatus}?${query}`)
+}
+
+export function getIngestionEvents(
+  workspaceId: string,
+  jobId: string,
+  after = 0,
+): Promise<IngestionFlowEventsResponse> {
+  return signedRequest<IngestionFlowEventsResponse>(API_ROUTES.ingestionEvents(jobId, workspaceId, after))
 }
 
 export function submitAnswerFeedback(

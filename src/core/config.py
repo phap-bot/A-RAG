@@ -25,11 +25,23 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Debug mode flag")
     log_level: str = Field(default="INFO", description="Logging level")
     log_format_json: bool = Field(default=True, description="Enforce JSON structured logging for MCP")
+    session_secret: str = Field(
+        default="a-rag-development-session-key-change-before-production",
+        description="Secret used to sign the browser session cookie",
+    )
+    session_cookie_secure: bool = Field(
+        default=False,
+        description="Set Secure on the browser session cookie in HTTPS deployments",
+    )
 
     # API Configuration
     api_host: str = Field(default="0.0.0.0", description="FastAPI host")
     api_port: int = Field(default=8010, description="FastAPI port; MinerU occupies 8000 by default")
     api_prefix: str = Field(default="/api/v1", description="FastAPI route prefix")
+    cors_allow_origin_regex: str = Field(
+        default=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        description="Allowed local frontend origins for development CORS preflight",
+    )
 
     # LLM & Embedding Settings
     openai_api_key: str = Field(default="", description="OpenAI API Key")
@@ -43,7 +55,16 @@ class Settings(BaseSettings):
 
     # Agentic Reflection Loop
     max_reflection_retries: int = Field(
-        default=3, ge=1, le=5, description="Maximum self-reflection retries for critic agent"
+        default=3, ge=1, le=5, description="Maximum total candidate review attempts, including the initial answer"
+    )
+    max_agent_handoffs: int = Field(default=12, ge=1, le=64, description="Maximum specialist handoffs in one RAG run")
+    max_tool_rounds_per_agent: int = Field(default=6, ge=1, le=20, description="Maximum ToolNode rounds for one agent in one RAG run")
+    agent_llm_enabled: bool = Field(
+        default=False,
+        description=(
+            "Allow Zone 2 agents to call the configured chat model. Keep false for "
+            "offline/local deterministic runs; enable explicitly in a deployment."
+        ),
     )
 
     # Vector Database Settings
@@ -86,7 +107,7 @@ class Settings(BaseSettings):
     )
     embedding_batch_size: int = Field(default=64, ge=1, le=512, description="Embedding request batch size")
     embedding_device: Literal["auto", "cpu", "cuda"] = Field(
-        default="auto", description="Local embedding inference device"
+        default="cuda", description="Local embedding inference device; CUDA is required by default"
     )
     embedding_normalize: bool = Field(
         default=True, description="L2-normalize embeddings before Neo4j cosine search"
@@ -139,6 +160,11 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_OVERLAP_TOKENS must be smaller than CHUNK_MAX_TOKENS")
         if self.embedding_enabled and self.embedding_provider == "none":
             raise ValueError("EMBEDDING_PROVIDER must be configured when EMBEDDING_ENABLED=true")
+        if self.app_env == "production":
+            if len(self.session_secret) < 32 or self.session_secret == "a-rag-development-session-key-change-before-production":
+                raise ValueError("SESSION_SECRET must be a long random value in production")
+            if not self.session_cookie_secure:
+                raise ValueError("SESSION_COOKIE_SECURE must be true in production")
         return self
 
 

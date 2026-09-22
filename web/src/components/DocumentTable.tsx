@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Download,
   FileCode2,
+  ScanSearch,
   FileText,
   Folder,
   FolderOpen,
@@ -15,11 +16,9 @@ import { useTranslation } from 'react-i18next'
 
 import type { DocumentRow } from '../types'
 import { Button } from './ui/Button'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 
 type DocumentTableProps = {
   documents: DocumentRow[]
-  sessionKey?: string
   compact?: boolean
   selectedIds?: Set<string>
   onToggle?: (documentId: string) => void
@@ -28,6 +27,7 @@ type DocumentTableProps = {
   onRename?: (document: DocumentRow) => void
   onDownload?: (document: DocumentRow) => void
   onAnalyze?: (document: DocumentRow) => void
+  onOpen?: (document: DocumentRow) => void
   onDelete?: (document: DocumentRow) => void
 }
 
@@ -49,10 +49,6 @@ type ActionMenuState = {
   placement: 'top' | 'bottom'
 }
 
-type DocumentTableSessionState = {
-  collapsedFolders: string[]
-}
-
 const localeMap: Record<string, string> = { en: 'en-US', ja: 'ja-JP', vi: 'vi-VN' }
 const ACTION_MENU_WIDTH = 196
 const ACTION_MENU_OFFSET = 8
@@ -60,6 +56,7 @@ const VIEWPORT_PADDING = 12
 
 function normalizeDocumentStatus(status: string): string {
   const normalized = status.trim().toLowerCase().replace(/_/g, '-')
+  if (normalized === 'uploaded') return 'uploaded'
   if (['pending', 'queued', 'waiting', 'discovered'].includes(normalized)) return 'pending'
   if ([
     'processing',
@@ -79,6 +76,7 @@ function normalizeDocumentStatus(status: string): string {
 
 function documentStatusLabel(status: string, translate: (key: string) => string): string {
   const labels: Record<string, string> = {
+    uploaded: translate('table.statusUploaded'),
     pending: translate('table.statusPending'),
     processing: translate('table.statusProcessing'),
     indexed: translate('table.statusIndexed'),
@@ -154,7 +152,6 @@ function buildTreeRows(documents: DocumentRow[], collapsedFolders: Set<string>, 
 
 export function DocumentTable({
   documents,
-  sessionKey,
   compact = false,
   selectedIds,
   onToggle,
@@ -163,33 +160,16 @@ export function DocumentTable({
   onRename,
   onDownload,
   onAnalyze,
+  onOpen,
   onDelete,
 }: DocumentTableProps) {
   const { t, i18n } = useTranslation()
-  const tableSessionKey = sessionKey ? sessionStorageKey('document-table', sessionKey) : null
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
-  const [hydratedSessionKey, setHydratedSessionKey] = useState<string | null>(null)
   const [actionMenu, setActionMenu] = useState<ActionMenuState | null>(null)
-
-  useEffect(() => {
-    if (!tableSessionKey) {
-      setCollapsedFolders(new Set())
-      setHydratedSessionKey(null)
-      return
-    }
-    const saved = readSessionState<DocumentTableSessionState>(tableSessionKey)
-    setCollapsedFolders(new Set(saved?.collapsedFolders || []))
-    setHydratedSessionKey(tableSessionKey)
-  }, [tableSessionKey])
-
-  useEffect(() => {
-    if (!tableSessionKey || hydratedSessionKey !== tableSessionKey) return
-    writeSessionState<DocumentTableSessionState>(tableSessionKey, { collapsedFolders: Array.from(collapsedFolders) })
-  }, [collapsedFolders, hydratedSessionKey, tableSessionKey])
   const actionMenuRef = useRef<HTMLDivElement | null>(null)
   const actionButtonRefs = useRef(new Map<string, HTMLButtonElement>())
   const selectable = Boolean(selectedIds && onToggle)
-  const hasActions = Boolean(onDownload || onRename || onAnalyze || onDelete)
+  const hasActions = Boolean(onDownload || onAnalyze || onOpen || onRename || onDelete)
   const allSelected = selectable && documents.length > 0 && documents.every((document) => selectedIds?.has(document.id))
   const locale = localeMap[(i18n.resolvedLanguage || 'vi').split('-')[0]] || 'vi-VN'
   const rows = buildTreeRows(documents, collapsedFolders, locale)
@@ -259,7 +239,7 @@ export function DocumentTable({
     }
 
     const rect = trigger.getBoundingClientRect()
-    const actionCount = [onDownload, onAnalyze, onRename, onDelete].filter(Boolean).length
+    const actionCount = [onDownload, onAnalyze, onOpen, onRename, onDelete].filter(Boolean).length
     const estimatedHeight = actionCount * 36 + 20
     const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_PADDING
     const spaceAbove = rect.top - VIEWPORT_PADDING
@@ -353,13 +333,15 @@ export function DocumentTable({
                     <span />
                   </label>
                 )}
-                <span className="document-name" role="cell" title={document.sourcePath} style={{ paddingInlineStart: `${row.depth * 18}px` }}>
-                  <i aria-hidden="true">
-                    {document.contentType.includes('json') || document.contentType.includes('xml')
-                      ? <FileCode2 size={17} />
-                      : <FileText size={17} />}
-                  </i>
-                  <b>{document.name}</b>
+                <span role="cell" className="document-name-cell">
+                  <button className="document-name document-name-button" type="button" title={document.sourcePath} style={{ paddingInlineStart: `${row.depth * 18}px` }} onClick={() => onOpen?.(document)}>
+                    <i aria-hidden="true">
+                      {document.contentType.includes('json') || document.contentType.includes('xml')
+                        ? <FileCode2 size={17} />
+                        : <FileText size={17} />}
+                    </i>
+                    <b>{document.name}</b>
+                  </button>
                 </span>
                 <span role="cell"><i className="status-indicator" data-status={normalizedStatus} />{documentStatusLabel(normalizedStatus, t)}</span>
                 <span role="cell">{/\d/.test(document.page) ? document.page : '-'}</span>
@@ -406,6 +388,11 @@ export function DocumentTable({
           {onAnalyze && (
             <Button variant="ghost" size="sm" leadingIcon={<Bot aria-hidden="true" />} role="menuitem" onClick={() => handleMenuAction(onAnalyze, actionMenu.document)}>
               {t('table.analyze')}
+            </Button>
+          )}
+          {onOpen && (
+            <Button variant="ghost" size="sm" leadingIcon={<ScanSearch aria-hidden="true" />} role="menuitem" onClick={() => handleMenuAction(onOpen, actionMenu.document)}>
+              {t('table.review')}
             </Button>
           )}
           {onRename && (

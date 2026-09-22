@@ -1,4 +1,4 @@
-export type ViewName = 'home' | 'signin' | 'signup' | 'forgot' | 'reset' | 'dashboard' | 'workspaces' | 'connections' | 'admin' | 'project' | 'assistant'
+export type ViewName = 'home' | 'signin' | 'signup' | 'forgot' | 'reset' | 'dashboard' | 'workspaces' | 'connections' | 'admin' | 'project' | 'assistant' | 'agent-flow'
 export type WorkspaceSection = 'overview' | 'documents' | 'members' | 'graph' | 'settings' | 'evaluator' | 'mcp'
 
 export type AuthUser = {
@@ -116,6 +116,7 @@ export type DocumentRow = {
   workspace: string
   page: string
   status: string
+  jobId?: string | null
   uploadedAt: string
   sourcePath: string
   sizeBytes: number
@@ -128,6 +129,8 @@ export type WorkspaceOverview = {
   document_count: number
   indexed_count: number
   processing_count: number
+  uploaded_count?: number
+  failed_count?: number
   storage_bytes: number
   recent_documents: DocumentApiRecord[]
 }
@@ -187,6 +190,7 @@ export type DocumentApiRecord = {
   workspace: string
   page: string
   status: string
+  job_id?: string | null
   uploaded_at: string
   source_path: string
   size_bytes: number
@@ -219,6 +223,12 @@ export type Citation = {
   confidence_score?: number
   confidence_label?: ConfidenceLabel
   score_status?: 'measured' | 'unavailable' | string
+  section_path?: string[]
+  parent_header?: string | null
+  page_numbers?: number[]
+  element_ids?: string[]
+  modality?: string
+  metadata?: Record<string, unknown>
 }
 
 export type QueryConfidence = {
@@ -263,6 +273,79 @@ export type QueryResponse = {
   citations: Citation[]
   confidence?: QueryConfidence
   chatSession?: ChatSessionSummary
+  chat_session?: ChatSessionSummary | null
+  retrieval_trace?: Record<string, unknown>
+  provenance_validation?: Record<string, unknown>
+  graph_context?: Array<Record<string, unknown>>
+  attempt_history?: Array<Record<string, unknown>>
+  agent_handoffs?: number
+  run_status?: string
+}
+
+export type AgentStreamEvent =
+  | {
+      event: 'agent_thought'
+      node: string
+      message: string
+      details?: unknown
+      run_id?: string | null
+    }
+  | {
+      event: 'tool_start'
+      tool_name: string
+      arguments: Record<string, unknown>
+      tool_call_id?: string | null
+      run_id?: string | null
+    }
+  | {
+      event: 'tool_result'
+      tool_name: string
+      output: unknown
+      tool_call_id?: string | null
+      run_id?: string | null
+    }
+  | {
+      event: 'message_chunk'
+      content: string
+      run_id?: string | null
+      answer_id?: string | null
+      citations?: Citation[]
+      confidence?: QueryConfidence
+      chat_session?: ChatSessionSummary | null
+      retrieval_trace?: Record<string, unknown>
+      provenance_validation?: Record<string, unknown>
+      attempt_history?: Array<Record<string, unknown>>
+      agent_handoffs?: number
+      run_status?: string
+    }
+  | {
+      event: 'final_response'
+      content: string
+      done: boolean
+      run_id?: string | null
+      answer_id?: string | null
+      citations?: Citation[]
+      confidence?: QueryConfidence
+      chat_session?: ChatSessionSummary | null
+      retrieval_trace?: Record<string, unknown>
+      provenance_validation?: Record<string, unknown>
+      attempt_history?: Array<Record<string, unknown>>
+      agent_handoffs?: number
+      run_status?: string
+    }
+  | {
+      event: 'error'
+      message: string
+      error_type: string
+      retryable: boolean
+      run_id?: string | null
+    }
+
+export type AgentStreamActivity = {
+  id: string
+  kind: 'thought' | 'tool'
+  label: string
+  details?: unknown
 }
 
 export type AssistantToolName =
@@ -312,10 +395,35 @@ export type IngestionStatus = {
   reason_code: string
   status: string
   stage: string | null
+  flow_stage?: string | null
+  flow_event_count?: number
   job_id: string | null
   chunk_count: number
   retryable: boolean
   updated_at: string | null
+  error?: Record<string, unknown> | null
+}
+
+export type IngestionFlowEvent = {
+  event: 'node_started' | 'node_completed' | 'progress' | 'state_update'
+  node?: string
+  namespace?: string[]
+  status?: string
+  kind?: string
+  payload?: Record<string, unknown>
+  duration_ms?: number
+  sequence: number
+  timestamp: string
+}
+
+export type IngestionFlowEventsResponse = {
+  job_id: string
+  document_id: string
+  status: string
+  flow_stage: string | null
+  events: IngestionFlowEvent[]
+  next_after: number
+  completed: boolean
 }
 
 export type AnswerFeedbackRating = 'positive' | 'negative'
@@ -329,6 +437,44 @@ export type DocumentPreview = {
   size_bytes: number
   preview: string
   preview_available: boolean
+}
+
+export type DocumentBoundingBox = {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+export type DocumentReviewElement = {
+  element_id: string
+  content: string
+  raw_content?: string | null
+  page_number: number
+  element_index: number
+  element_type: string
+  bounding_box?: DocumentBoundingBox | null
+  confidence: number
+  parent_header?: string | null
+  header_level?: number | null
+  section_path: string[]
+  extra: Record<string, unknown>
+  vlm_caption?: string | null
+}
+
+export type DocumentReviewPage = {
+  page_number: number
+  elements: DocumentReviewElement[]
+}
+
+export type DocumentReview = DocumentPreview & {
+  total_pages: number
+  elements: DocumentReviewElement[]
+  pages: DocumentReviewPage[]
+  markdown: string
+  stats: Record<string, unknown>
+  has_bounding_boxes: boolean
+  review_available: boolean
 }
 
 export type DocumentMetadata = {

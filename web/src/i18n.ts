@@ -3,14 +3,7 @@ import { initReactI18next } from 'react-i18next'
 import { adminTranslations } from './adminTranslations'
 import { pageTranslations } from './pageTranslations'
 
-export const LANGUAGE_STORAGE_KEY = 'qa-ui-language'
 const supportedLanguages = ['vi', 'en', 'ja'] as const
-
-function getStoredLanguage(): string {
-  if (typeof window === 'undefined') return 'vi'
-  const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY)?.split('-')[0]
-  return stored && supportedLanguages.includes(stored as typeof supportedLanguages[number]) ? stored : 'vi'
-}
 
 const resources = {
   vi: {
@@ -218,7 +211,7 @@ const resources = {
 
 i18n.use(initReactI18next).init({
   resources,
-  lng: getStoredLanguage(),
+  lng: 'vi',
   fallbackLng: 'vi',
   supportedLngs: [...supportedLanguages],
   interpolation: {

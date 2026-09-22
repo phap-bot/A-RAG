@@ -24,7 +24,6 @@ import {
 } from '../api'
 import { Button } from '../components/ui/Button'
 import { Select } from '../components/ui/Select'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 import type {
   AdminUserRecord,
   IssuedMcpCredential,
@@ -46,14 +45,6 @@ type IssuedMcpOwner = {
   display_name: string
   email: string
   global_role: string
-}
-
-type AgentConnectionsSessionState = {
-  workspaceId: string
-  name: string
-  ttlDays: number
-  credentialAudience: CredentialAudience
-  targetUserId: string
 }
 
 function formatDate(value: string, locale: string): string {
@@ -86,15 +77,13 @@ export function AgentConnectionsPage({
   embedded = false,
 }: AgentConnectionsPageProps) {
   const { t, i18n } = useTranslation()
-  const sessionKey = sessionStorageKey('mcp', `${bootstrap.session.email || bootstrap.session.display_name}:${embeddedWorkspaceId || 'all'}`)
-  const savedSession = readSessionState<AgentConnectionsSessionState>(sessionKey)
   const [credentials, setCredentials] = useState<McpCredential[]>([])
   const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>([])
-  const [workspaceId, setWorkspaceId] = useState(savedSession?.workspaceId || embeddedWorkspaceId || workspaces[0]?.workspace_id || '')
-  const [name, setName] = useState(savedSession?.name || 'Local knowledge Agent')
-  const [ttlDays, setTtlDays] = useState(savedSession?.ttlDays || 30)
-  const [credentialAudience, setCredentialAudience] = useState<CredentialAudience>(savedSession?.credentialAudience || 'admin')
-  const [targetUserId, setTargetUserId] = useState(savedSession?.targetUserId || '')
+  const [workspaceId, setWorkspaceId] = useState(embeddedWorkspaceId || workspaces[0]?.workspace_id || '')
+  const [name, setName] = useState('Local knowledge Agent')
+  const [ttlDays, setTtlDays] = useState(30)
+  const [credentialAudience, setCredentialAudience] = useState<CredentialAudience>('admin')
+  const [targetUserId, setTargetUserId] = useState('')
   const [issued, setIssued] = useState<IssuedMcpCredential | null>(null)
   const [issuedOwner, setIssuedOwner] = useState<IssuedMcpOwner | null>(null)
   const [loading, setLoading] = useState(true)
@@ -107,16 +96,6 @@ export function AgentConnectionsPage({
     user.role === 'member'
     && user.is_active
   ))
-
-  useEffect(() => {
-    writeSessionState<AgentConnectionsSessionState>(sessionKey, {
-      workspaceId,
-      name,
-      ttlDays,
-      credentialAudience,
-      targetUserId,
-    })
-  }, [credentialAudience, name, sessionKey, targetUserId, ttlDays, workspaceId])
 
   async function loadCredentials() {
     setLoading(true)

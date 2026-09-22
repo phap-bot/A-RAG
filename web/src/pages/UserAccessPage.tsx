@@ -23,7 +23,6 @@ import {
 } from '../api'
 import { Button } from '../components/ui/Button'
 import { Select } from '../components/ui/Select'
-import { readSessionState, sessionStorageKey, writeSessionState } from '../sessionState'
 import type {
   AdminUserRecord,
   AdminWorkspaceRecord,
@@ -45,38 +44,20 @@ const rolePermissionKeys: Record<ProjectRole, string[]> = {
   viewer: ['readQa', 'preview'],
 }
 
-type UserAccessSessionState = {
-  selectedUserId: string
-  query: string
-  newWorkspaceId: string
-  newProjectRole: ProjectRole
-}
-
 export function UserAccessPage({ bootstrap }: UserAccessPageProps) {
   const { t } = useTranslation()
-  const sessionKey = sessionStorageKey('admin-access', bootstrap.session.email || bootstrap.session.display_name)
-  const savedSession = readSessionState<UserAccessSessionState>(sessionKey)
   const [users, setUsers] = useState<AdminUserRecord[]>([])
   const [workspaces, setWorkspaces] = useState<AdminWorkspaceRecord[]>([])
-  const [selectedUserId, setSelectedUserId] = useState(savedSession?.selectedUserId || '')
-  const [query, setQuery] = useState(savedSession?.query || '')
-  const [newWorkspaceId, setNewWorkspaceId] = useState(savedSession?.newWorkspaceId || '')
-  const [newProjectRole, setNewProjectRole] = useState<ProjectRole>(savedSession?.newProjectRole || 'viewer')
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const [query, setQuery] = useState('')
+  const [newWorkspaceId, setNewWorkspaceId] = useState('')
+  const [newProjectRole, setNewProjectRole] = useState<ProjectRole>('viewer')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState('')
   const [error, setError] = useState('')
   const [feedbackSummary, setFeedbackSummary] = useState<AdminFeedbackSummary | null>(null)
   const [feedback, setFeedback] = useState<AdminFeedbackRecord[]>([])
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
-
-  useEffect(() => {
-    writeSessionState<UserAccessSessionState>(sessionKey, {
-      selectedUserId,
-      query,
-      newWorkspaceId,
-      newProjectRole,
-    })
-  }, [newProjectRole, newWorkspaceId, query, selectedUserId, sessionKey])
 
   async function loadFeedbackData() {
     try {

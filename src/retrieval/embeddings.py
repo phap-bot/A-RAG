@@ -82,6 +82,24 @@ class LocalBGEEmbeddingProvider:
                     details={"install": "pip install sentence-transformers"},
                 ) from exc
 
+            if settings.embedding_device == "cuda":
+                try:
+                    import torch
+                except ImportError as exc:
+                    raise ConfigurationError(
+                        "EMBEDDING_DEVICE=cuda requires a CUDA-enabled PyTorch installation",
+                        details={"install": "install the CUDA build of torch"},
+                    ) from exc
+                if not torch.cuda.is_available():
+                    raise ConfigurationError(
+                        "EMBEDDING_DEVICE=cuda but CUDA is unavailable",
+                        details={
+                            "cuda_available": False,
+                            "device": settings.embedding_device,
+                            "remediation": "install a CUDA-enabled torch build and verify the NVIDIA driver",
+                        },
+                    )
+
             model_options: dict[str, Any] = {}
             if settings.embedding_device != "auto":
                 model_options["device"] = settings.embedding_device
@@ -93,7 +111,15 @@ class LocalBGEEmbeddingProvider:
                     settings.embedding_model_name,
                     **model_options,
                 )
+                if settings.embedding_device == "cuda" and not str(getattr(self._model, "device", "")).startswith("cuda"):
+                    self._model = None
+                    raise ConfigurationError(
+                        "BGE-M3 did not load on CUDA",
+                        details={"requested_device": "cuda"},
+                    )
             except Exception as exc:
+                if isinstance(exc, ConfigurationError):
+                    raise
                 raise ConfigurationError(
                     "Failed to load the local BGE-M3 embedding model",
                     details={

@@ -19,75 +19,11 @@ from src.core.prompts import (
 
 
 def critic_reflection_node(state: AgentState) -> Dict[str, Any]:
-    """Inspect candidate synthesis against retrieved context and verify faithfulness/hallucinations."""
-    query = state["query"]
-    retrieved_docs = state.get("retrieved_docs", [])
-    graph_context = state.get("graph_context", [])
-    candidate_response = state.get("synthesized_response", "")
-    retry_count = state.get("retry_count", 0)
-    max_retries = state.get("max_retries", 3)
+    """Run the tool-aware Critic; provenance is applied when its turn completes."""
+    from src.agents.agent_runtime import run_agent_node
 
-    logger.info(
-        f"Entering Critic Agent: evaluating iteration={retry_count + 1}/{max_retries}"
-    )
-
-    context_str = "\n".join([f"[{d.chunk_id}]: {d.content}" for d in retrieved_docs])
-    graph_str = str(graph_context)
-
-    formatted_user_prompt = CRITIC_REFLECTION_USER_TEMPLATE.format(
-        query=query,
-        retrieved_context=context_str,
-        graph_context=graph_str,
-        candidate_response=candidate_response,
-    )
-
-    # Call LLM or deterministic quality evaluator
-    if settings.openai_api_key and settings.openai_api_key != "sk-mock-key-replace-with-actual":
-        try:
-            llm = get_chat_llm(temperature=0.0)
-            messages = [
-                SystemMessage(content=CRITIC_REFLECTION_SYSTEM_PROMPT),
-                HumanMessage(content=formatted_user_prompt),
-            ]
-            response = llm.invoke(messages)
-            parsed_json = json.loads(response.content)
-            verdict = CriticVerdict(**parsed_json)
-        except Exception as exc:
-            logger.warning(f"LLM Critic evaluation failed: {exc}. Using deterministic validation.")
-            verdict = _deterministic_evaluation(candidate_response, retrieved_docs, retry_count, max_retries)
-    else:
-        verdict = _deterministic_evaluation(candidate_response, retrieved_docs, retry_count, max_retries)
-
-    provenance = validate_response_provenance(
-        candidate_response,
-        retrieved_docs,
-        graph_context,
-    )
-    has_reference = bool(provenance["cited_chunk_ids"] or provenance["cited_graph_ids"])
-    if not provenance["valid"] or (retrieved_docs and not has_reference):
-        verdict = verdict.model_copy(
-            update={
-                "passed": False,
-                "citation_accuracy_score": 0.0,
-                "should_reformulate": True,
-                "critique_feedback": (
-                    f"Provenance gate rejected the candidate: "
-                    f"unknown_chunks={provenance['unknown_chunk_ids']}, "
-                    f"unknown_graph={provenance['unknown_graph_ids']}"
-                ),
-            }
-        )
-
-    new_retry_count = retry_count + 1
-    logger.info(
-        f"Critic verdict: passed={verdict.passed}, faithfulness={verdict.faithfulness_score}, relevance={verdict.relevance_score}, next_retry={new_retry_count}"
-    )
-
-    return {
-        "critique": verdict,
-        "retry_count": new_retry_count,
-        "provenance_validation": provenance,
-    }
+    logger.info("Entering Critic agent")
+    return run_agent_node("critic_reflection", state)
 
 
 def should_continue_reflection(state: AgentState) -> Literal["reformulate", "end"]:
